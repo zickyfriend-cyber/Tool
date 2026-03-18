@@ -2,37 +2,29 @@
   YTClipDownloader  설치 및 실행 방법
 ========================================
 
-[ 사전 준비 ]
+[ 실행 방법 ]
 
-1. Python 설치
-   - https://www.python.org/downloads/ 에서 최신 버전 다운로드
-   - 설치 시 반드시 "Add Python to PATH" 체크 후 설치
-
-2. yt-dlp 다운로드 (포함되어 있지 않은 경우)
-   - https://github.com/yt-dlp/yt-dlp/releases
-   - yt-dlp.exe 파일을 다운로드하여 ytdlp\ 폴더에 넣기
+run.bat 실행
+  - Python 및 필요한 패키지가 없으면 자동으로 설치 후 실행됩니다.
+  - 인터넷 연결 필요 (최초 실행 시)
+  - 이후에는 그냥 run.bat 만 실행하면 됩니다.
 
 
-[ 최초 설치 ]
+[ 자동 설치 조건 ]
 
-1. setup.bat 실행
-   - 필요한 Python 패키지(PyQt5, PyQtWebEngine 등)를 자동 설치
-   - 인터넷 연결 필요
-   - 최초 1회만 실행하면 됨
-
-
-[ 실행 ]
-
-1. run.bat 실행
-   - 설치 완료 후 매번 이 파일로 실행
+- Python 자동 설치: Windows 10 버전 1709 이상 (winget 내장)
+- 구형 Windows 또는 자동 설치 실패 시:
+    1. https://www.python.org/downloads/ 에서 Python 수동 설치
+    2. 설치 시 "Add Python to PATH" 반드시 체크
+    3. setup.bat 실행 후 run.bat 실행
 
 
 [ 폴더 구조 ]
 
 YTClipDownloader\
 ├── main.py                  프로그램 본체 (코드)
-├── setup.bat                패키지 설치 스크립트 (최초 1회)
-├── run.bat                  실행 스크립트
+├── setup.bat                패키지 수동 설치 스크립트
+├── run.bat                  실행 스크립트 (Python 없어도 자동 설치)
 ├── requirements.txt         필요한 패키지 목록
 ├── 설치_및_실행_방법.txt    이 파일
 ├── download\                기본 저장 폴더 (자동 생성)
@@ -44,14 +36,15 @@ YTClipDownloader\
 
 [ 문제 해결 ]
 
-Q. setup.bat 실행 후 run.bat에서 오류가 나는 경우
-   - Python이 PATH에 등록되었는지 확인
-   - Python 재설치 시 "Add Python to PATH" 체크 필수
+Q. run.bat 실행 시 Python 자동 설치가 실패하는 경우
+   - https://www.python.org/downloads/ 에서 직접 설치
+   - 설치 시 "Add Python to PATH" 체크 필수
+   - 설치 후 setup.bat 실행, 이후 run.bat 실행
 
 Q. 영상 다운로드가 안 되는 경우
    - 도구 메뉴 → yt-dlp 업데이트 실행 (사이트 변경 대응)
 
 Q. 미리보기가 안 되는 경우
-   - setup.bat 을 다시 실행하여 PyQtWebEngine 설치 확인
+   - setup.bat 을 실행하여 PyQtWebEngine 설치 확인
 
 ========================================

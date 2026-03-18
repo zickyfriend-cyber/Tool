@@ -982,6 +982,8 @@ class MainWindow(QMainWindow):
         bot_lay.addWidget(self.progress)
 
         self._left_splitter.setSizes([500, 460])
+        self._left_splitter.setStretchFactor(0, 1)
+        self._left_splitter.setStretchFactor(1, 1)
 
         # ── Right: 탭 위젯 (저장 폴더 / 로그) ───────────────────────────────────
         self._right_tabs = QTabWidget()
@@ -1159,13 +1161,13 @@ class MainWindow(QMainWindow):
         self._right_vsplitter.addWidget(self._right_tabs)
         self._right_vsplitter.addWidget(queue_panel)
         self._right_vsplitter.setSizes([400, 260])
-        self._right_vsplitter.setStretchFactor(0, 1)
-        self._right_vsplitter.setStretchFactor(1, 0)
+        self._right_vsplitter.setStretchFactor(0, 6)
+        self._right_vsplitter.setStretchFactor(1, 4)
 
         splitter.addWidget(self._right_vsplitter)
         splitter.setSizes([730, 320])
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(0, 7)
+        splitter.setStretchFactor(1, 3)
 
         self.path_input.lineEdit().editingFinished.connect(self._refresh_file_list)
         self.path_input.currentIndexChanged.connect(self._refresh_file_list)
