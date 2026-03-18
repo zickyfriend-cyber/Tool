@@ -46,7 +46,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION  = "1.0"
+APP_VERSION  = "1.1"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -689,6 +689,9 @@ class MainWindow(QMainWindow):
         self._setup_timers()
         self._fetch_versions()
         self._restore_settings()
+        _ver = QLabel(f"  v{APP_VERSION}  ")
+        _ver.setStyleSheet("color:#7ec8e3; font-size:11px;")
+        self.statusBar().addPermanentWidget(_ver)
         _credit = QLabel("  Made by aram  ")
         _credit.setStyleSheet("color:#666; font-size:11px;")
         self.statusBar().addPermanentWidget(_credit)
