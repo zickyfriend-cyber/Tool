@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QPushButton, QLabel, QTextEdit, QTextBrowser, QSizePolicy, QFrame,
     QComboBox, QCheckBox, QProgressBar, QFileDialog,
     QSplitter, QTreeWidget, QTreeWidgetItem, QMenu, QMessageBox, QInputDialog,
-    QTabWidget, QFileIconProvider,
+    QTabWidget, QFileIconProvider, QDoubleSpinBox, QSpinBox,
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
 from PyQt5.QtCore import Qt, QTimer, QUrl, QProcess, pyqtSignal, QEvent, QMimeData, QFileInfo, QSettings
@@ -46,7 +46,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION  = "1.1"
+APP_VERSION  = "1.2"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -671,6 +671,7 @@ class MainWindow(QMainWindow):
         self._dl_start_time   = 0.0
         self._url_info_proc   = None   # yt-dlp -j 미리보기 정보 프로세스
         self._closing         = False  # closeEvent 진입 여부
+        self._cookie_file     = None   # 쿠키 파일 경로
         # 영상 큐
         self._queue: list = []
         self._queue_running   = False
@@ -915,6 +916,42 @@ class MainWindow(QMainWindow):
         self.gif_row.setVisible(False)
         bot_lay.addWidget(self.gif_row)
 
+        # ── 영상 효과 옵션 ────────────────────────────────────────────────────
+        self.effect_row = QWidget()
+        eff_lay = QHBoxLayout(self.effect_row)
+        eff_lay.setContentsMargins(0, 0, 0, 0)
+        eff_lay.addWidget(QLabel("회전/반전:"))
+        self.rot_combo = QComboBox()
+        self.rot_combo.addItems(['없음', '90° 시계', '90° 반시계', '180°', '좌우 반전', '상하 반전'])
+        self.rot_combo.setFixedWidth(110)
+        eff_lay.addWidget(self.rot_combo)
+        eff_lay.addSpacing(16)
+        eff_lay.addWidget(QLabel("볼륨:"))
+        self.vol_spin = QDoubleSpinBox()
+        self.vol_spin.setRange(0.1, 5.0)
+        self.vol_spin.setSingleStep(0.1)
+        self.vol_spin.setValue(1.0)
+        self.vol_spin.setDecimals(1)
+        self.vol_spin.setFixedWidth(68)
+        self.vol_spin.setToolTip("1.0 = 원본 볼륨  /  2.0 = 2배  /  0.5 = 절반")
+        eff_lay.addWidget(self.vol_spin)
+        eff_lay.addWidget(QLabel("x"))
+        eff_lay.addSpacing(16)
+        eff_lay.addWidget(QLabel("압축(CRF):"))
+        self.crf_spin = QSpinBox()
+        self.crf_spin.setRange(0, 51)
+        self.crf_spin.setValue(0)
+        self.crf_spin.setFixedWidth(54)
+        self.crf_spin.setToolTip("0 = 자동(기본)  /  값이 클수록 용량↓ 화질↓  (권장: 18~28)")
+        eff_lay.addWidget(self.crf_spin)
+        eff_lay.addStretch()
+        self.screenshot_btn = QPushButton("📷 스크린샷")
+        self.screenshot_btn.setFixedWidth(100)
+        self.screenshot_btn.setToolTip("현재 재생 위치를 PNG로 저장")
+        self.screenshot_btn.clicked.connect(self._screenshot)
+        eff_lay.addWidget(self.screenshot_btn)
+        bot_lay.addWidget(self.effect_row)
+
         # ── Save path ─────────────────────────────────────────────────────────
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("저장 경로:"))
@@ -923,6 +960,7 @@ class MainWindow(QMainWindow):
         self.path_input.setInsertPolicy(QComboBox.NoInsert)
         self.path_input.lineEdit().setPlaceholderText("저장할 폴더 경로")
         self.path_input.addItem(DOWNLOAD_DIR)
+        self.path_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         path_row.addWidget(self.path_input)
         btn_browse = QPushButton("폴더 선택")
         btn_browse.setFixedWidth(80)
@@ -1179,6 +1217,8 @@ class MainWindow(QMainWindow):
         # ── 메뉴바: 도구 ─────────────────────────────────────────────────────
         tool_menu = self.menuBar().addMenu("도구(&T)")
         tool_menu.addAction("기능 가이드", self._show_feature_guide)
+        tool_menu.addSeparator()
+        tool_menu.addAction("쿠키 파일 설정...", self._set_cookie_file)
         tool_menu.addSeparator()
         tool_menu.addAction("yt-dlp 업데이트", self._update_ytdlp)
         tool_menu.addAction("ffmpeg 업데이트 방법...", self._show_ffmpeg_update_help)
@@ -2006,6 +2046,52 @@ v.addEventListener('click',function(){{togglePlay();}});
         af = _build_atempo(speed)
         return vf, af
 
+    def _build_video_filters(self):
+        """배속 + 해상도 스케일 + 회전/반전을 합친 vf 문자열 반환."""
+        parts = []
+        if abs(self._speed - 1.0) > 0.001:
+            parts.append(f"setpts={1.0 / self._speed:.6f}*PTS")
+        _RES_H = {'1080p': 1080, '720p': 720, '480p': 480, '360p': 360}
+        scale_h = _RES_H.get(self.res_combo.currentText())
+        if scale_h:
+            parts.append(f'scale=-2:{scale_h}')
+        _ROT = {
+            '90° 시계':   'transpose=1',
+            '90° 반시계': 'transpose=2',
+            '180°':       'transpose=2,transpose=2',
+            '좌우 반전':  'hflip',
+            '상하 반전':  'vflip',
+        }
+        rot = _ROT.get(self.rot_combo.currentText())
+        if rot:
+            parts.append(rot)
+        return ','.join(parts) if parts else None
+
+    def _build_audio_filters(self):
+        """배속 + 볼륨을 합친 af 문자열 반환."""
+        parts = []
+        if abs(self._speed - 1.0) > 0.001:
+            parts.append(_build_atempo(self._speed))
+        vol = self.vol_spin.value()
+        if abs(vol - 1.0) > 0.01:
+            parts.append(f'volume={vol:.2f}')
+        return ','.join(parts) if parts else None
+
+    def _needs_post_encode(self):
+        """ffmpeg 후처리 재인코딩이 필요한지 여부."""
+        return (
+            self.rot_combo.currentText() != '없음'
+            or abs(self.vol_spin.value() - 1.0) > 0.01
+            or self.crf_spin.value() > 0
+            or abs(self._speed - 1.0) > 0.001
+        )
+
+    def _cookie_args(self):
+        """쿠키 파일이 설정된 경우 yt-dlp --cookies 인수 반환."""
+        if self._cookie_file and os.path.exists(self._cookie_file):
+            return ['--cookies', self._cookie_file]
+        return []
+
     # -----------------------------------------------------------------------
     # Download
     # -----------------------------------------------------------------------
@@ -2046,6 +2132,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         args = (
             ['--download-sections', f'*{start_str}-{end_str}']
             + fmt_args
+            + self._cookie_args()
             + ['--ffmpeg-location', FFMPEG_DIR,
                '-P', save_dir,
                '-o', self._unique_output(save_dir, actual_ext),
@@ -2069,8 +2156,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._start_local_clip(start_str, end_str, actual_ext, save_dir)
         elif actual_ext == 'gif':
             self._start_gif_stage1(url, start_str, end_str, save_dir)
-        elif abs(self._speed - 1.0) > 0.001:
-            # 속도 != 1x → 임시 다운로드 후 ffmpeg 속도 변환 (2단계)
+        elif self._needs_post_encode():
+            # 효과 적용 → 임시 다운로드 후 ffmpeg 후처리 (2단계)
             from datetime import datetime
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             stem = self._get_output_name(actual_ext, f'clip_{ts}')
@@ -2081,6 +2168,7 @@ v.addEventListener('click',function(){{togglePlay();}});
             temp_args = (
                 ['--download-sections', f'*{start_str}-{end_str}']
                 + fmt_args
+                + self._cookie_args()
                 + ['--ffmpeg-location', FFMPEG_DIR,
                    '-P', save_dir,
                    '-o', f'_clipdl_speed_temp_{os.getpid()}.%(ext)s',
@@ -2088,7 +2176,7 @@ v.addEventListener('click',function(){{togglePlay();}});
                    '--no-part',
                    url]
             )
-            self._log(f"▶ 속도 {self._speed}x — 1/2  임시 다운로드 중...")
+            self._log(f"▶ 효과 적용 — 1/2  임시 다운로드 중...")
             self._run_process(YTDLP_EXE, temp_args, self._on_url_speed_dl_done)
         else:
             self._run_process(YTDLP_EXE, args, self._on_done)
@@ -2110,14 +2198,21 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._reset_dl_ui()
             return
         self._speed_temp = matches[0]
-        vf, af = self._build_speed_filters(self._speed)
+        vf = self._build_video_filters()
+        af = self._build_audio_filters()
+        mute = self.mute_chk.isChecked()
+        crf  = self.crf_spin.value()
         ffmpeg_args = ['-y', '-i', self._speed_temp]
         if vf:
             ffmpeg_args += ['-filter:v', vf]
-        if af:
+        if mute:
+            ffmpeg_args += ['-an']
+        elif af:
             ffmpeg_args += ['-filter:a', af]
+        if crf > 0:
+            ffmpeg_args += ['-crf', str(crf)]
         ffmpeg_args += [self._speed_final_out]
-        self._log(f"▶ 속도 {self._speed}x — 2/2  속도 변환 중...")
+        self._log(f"▶ 효과 적용 — 2/2  인코딩 중...")
         self.progress.setRange(0, 0)
         self._run_process(FFMPEG_EXE, ffmpeg_args, self._on_url_speed_encode_done)
 
@@ -2128,7 +2223,7 @@ v.addEventListener('click',function(){{togglePlay();}});
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
             self._new_file_paths.add(path)
-            self._log_link(f"✔ 완료! (속도 {self._speed}x)  저장 위치: ", path)
+            self._log_link(f"✔ 완료!  저장 위치: ", path)
             self._refresh_file_list()
             if self.autoopen_chk.isChecked():
                 os.startfile(path)
@@ -2146,6 +2241,48 @@ v.addEventListener('click',function(){{togglePlay();}});
                 os.remove(tmp)
             except Exception:
                 pass
+
+    # -----------------------------------------------------------------------
+    # 스크린샷
+    # -----------------------------------------------------------------------
+    def _screenshot(self):
+        cur_text = self.cur_lbl.text()   # "현재 위치:  HH:MM:SS"
+        parts = cur_text.split()
+        time_str = parts[-1] if parts and ':' in parts[-1] else '00:00:00'
+        save_dir = self.path_input.currentText().strip() or DOWNLOAD_DIR
+        os.makedirs(save_dir, exist_ok=True)
+        from datetime import datetime
+        ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = unique_path(os.path.join(save_dir, f'screenshot_{ts}.png'))
+        if self._mode == 'local' and self._local_file and os.path.exists(self._local_file):
+            args = ['-y', '-ss', time_str, '-i', self._local_file, '-frames:v', '1', out]
+            self._run_process(FFMPEG_EXE, args,
+                              lambda c, s: self._on_screenshot_done(c, s, out))
+        else:
+            pixmap = self.web.grab()
+            pixmap.save(out, 'PNG')
+            self._on_screenshot_done(0, '', out)
+
+    def _on_screenshot_done(self, code: int, _status, path: str):
+        if code == 0:
+            self._log_link("📷 스크린샷 저장: ", path)
+            self._refresh_file_list()
+        else:
+            self._log("✘ 스크린샷 저장 실패")
+
+    # -----------------------------------------------------------------------
+    # 쿠키 파일 설정
+    # -----------------------------------------------------------------------
+    def _set_cookie_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "쿠키 파일 선택", "",
+            "쿠키 파일 (*.txt);;모든 파일 (*.*)")
+        if path:
+            self._cookie_file = path
+            self._log(f"🍪 쿠키 파일 설정: {path}")
+        else:
+            self._cookie_file = None
+            self._log("🍪 쿠키 파일 설정 해제")
 
     # -----------------------------------------------------------------------
     # Local file clip  (ffmpeg 직접 사용)
@@ -2186,14 +2323,9 @@ v.addEventListener('click',function(){{togglePlay();}});
             mute = self.mute_chk.isChecked()
             stem = self._get_output_name(ext, f'{base}_clip_{ts}')
             out  = unique_path(os.path.join(save_dir, f"{stem}.{ext}"))
-            vf, af = self._build_speed_filters(self._speed)
-            # 해상도 스케일 필터: 최고화질 이외 선택 시 다운스케일
-            _RES_H = {'1080p': 1080, '720p': 720, '480p': 480, '360p': 360}
-            res_sel = self.res_combo.currentText()
-            scale_h = _RES_H.get(res_sel)
-            scale_vf = f'scale=-2:{scale_h}' if scale_h else None
-            if scale_vf:
-                vf = f'{scale_vf},{vf}' if vf else scale_vf
+            vf  = self._build_video_filters()
+            af  = self._build_audio_filters()
+            crf = self.crf_spin.value()
             if ext in ('mp3',):
                 base_args = ['-y', '-i', self._local_file,
                              '-ss', start_str, '-to', end_str, '-vn']
@@ -2201,8 +2333,8 @@ v.addEventListener('click',function(){{togglePlay();}});
                     base_args += ['-filter:a', af]
                 args = base_args + ['-acodec', 'mp3', out]
             else:
-                if vf or af:
-                    # 재인코딩 (속도 변환 또는 해상도 스케일)
+                if vf or af or crf > 0:
+                    # 재인코딩 (효과 적용)
                     base_args = ['-y', '-i', self._local_file,
                                  '-ss', start_str, '-to', end_str]
                     if vf:
@@ -2211,6 +2343,8 @@ v.addEventListener('click',function(){{togglePlay();}});
                         base_args += ['-an']
                     elif af:
                         base_args += ['-filter:a', af]
+                    if crf > 0:
+                        base_args += ['-crf', str(crf)]
                     args = base_args + [out]
                 else:
                     # input seeking(-ss before -i): 키프레임에서 시작 → 첫 프레임 흰 화면 방지
@@ -2242,17 +2376,18 @@ v.addEventListener('click',function(){{togglePlay();}});
 
         w = self.gif_width.currentText()
         fmt = f'bv[width<={w}]/best[width<={w}]/bv*/best' if w != '원본' else 'bv*/best'
-        args = [
-            '--download-sections', f'*{start_str}-{end_str}',
-            '-f', fmt,
-            '--merge-output-format', 'mp4',
-            '--ffmpeg-location', FFMPEG_DIR,
-            '-P', save_dir,
-            '-o', f'_clipdl_temp_{os.getpid()}.mp4',
-            '--no-part',
-            '--windows-filenames',
-            url,
-        ]
+        args = (
+            ['--download-sections', f'*{start_str}-{end_str}',
+             '-f', fmt,
+             '--merge-output-format', 'mp4',
+             '--ffmpeg-location', FFMPEG_DIR,
+             '-P', save_dir,
+             '-o', f'_clipdl_temp_{os.getpid()}.mp4',
+             '--no-part',
+             '--windows-filenames']
+            + self._cookie_args()
+            + [url]
+        )
         self._log("1/2  영상 다운로드 중...")
         self._run_process(YTDLP_EXE, args, self._on_gif_stage1_done)
 
@@ -3057,11 +3192,19 @@ v.addEventListener('click',function(){{togglePlay();}});
   <li>형식을 <b>gif</b>로 선택하면 FPS와 가로 크기 설정 가능</li>
   <li>FPS가 낮을수록, 크기가 작을수록 파일 용량 감소</li>
 </ul>
-<h3>재생 속도</h3>
+<h3>재생 속도 (배속 저장)</h3>
 <ul>
-  <li>0.5x ~ 2.0x 배속으로 저장 가능</li>
-  <li>미리보기 재생 속도와 연동됨</li>
+  <li>0.25x ~ 3.0x 배속으로 저장 가능</li>
+  <li>미리보기 재생 속도와 연동되며, 저장된 파일에도 실제로 적용됨</li>
+  <li>배속이 1x가 아닐 경우 자동으로 2단계 처리 (다운로드 → ffmpeg 인코딩)</li>
 </ul>
+<h3>영상 효과 옵션</h3>
+<ul>
+  <li><b>회전/반전</b>: 90° 시계 / 90° 반시계 / 180° / 좌우 반전 / 상하 반전 — 저장 파일에 적용</li>
+  <li><b>볼륨</b>: 0.1x ~ 5.0x 범위로 저장 시 오디오 음량 조절 (1.0 = 원본)</li>
+  <li><b>압축(CRF)</b>: 0 = 자동(기본), 값이 클수록 용량↓ 화질↓ &nbsp;(권장: 18~28)</li>
+</ul>
+<div class='tip'>💡 회전/볼륨/CRF/배속 중 하나라도 기본값이 아니면 URL 다운로드 시 자동으로 2단계 인코딩이 적용됩니다.</div>
 <h3>저장 경로 / 파일명</h3>
 <ul>
   <li>저장 경로를 지정하지 않으면 <b>download\\</b> 폴더에 자동 저장</li>
@@ -3100,7 +3243,16 @@ v.addEventListener('click',function(){{togglePlay();}});
   <li>저장된 파일 목록을 실시간으로 표시</li>
   <li>파일 <b>클릭</b>: 해당 폴더를 탐색기로 열기</li>
   <li>파일을 미리보기 창으로 <b>드래그</b>하면 바로 로드</li>
-  <li>우클릭 메뉴: 파일 열기 / 폴더 열기 / 삭제</li>
+  <li>우클릭 메뉴: 파일 열기 / 폴더 열기 / 삭제 / 이름 변경</li>
+  <li><b>F2</b>: 이름 변경 &nbsp;/&nbsp; <b>Delete</b>: 삭제 &nbsp;/&nbsp; <b>Enter</b>: 파일 열기</li>
+</ul>
+
+<h2 style='margin-top:22px'>📷 스크린샷</h2>
+<ul>
+  <li>영상 효과 옵션 행 오른쪽의 <b>📷 스크린샷</b> 버튼 클릭</li>
+  <li><b>로컬 파일</b>: 현재 재생 위치의 프레임을 PNG로 정확하게 추출</li>
+  <li><b>URL 모드</b>: 플레이어 화면을 캡처하여 PNG로 저장</li>
+  <li>저장 위치는 현재 설정된 저장 경로와 동일</li>
 </ul>
 
 <h2 style='margin-top:22px'>⚙️ 기타</h2>
@@ -3112,9 +3264,11 @@ v.addEventListener('click',function(){{togglePlay();}});
 
 <h2 style='margin-top:22px'>🔧 도구 메뉴</h2>
 <ul>
+  <li><b>쿠키 파일 설정</b>: Netscape 형식 쿠키 파일(.txt)을 지정하면 로그인이 필요한 영상도 다운로드 가능</li>
   <li><b>yt-dlp 업데이트</b>: 최신 사이트 지원을 위해 주기적으로 업데이트 권장</li>
   <li><b>ffmpeg 업데이트 방법</b>: 수동 업데이트 안내</li>
 </ul>
+<div class='tip'>💡 쿠키 파일은 브라우저 확장 프로그램(예: "Get cookies.txt LOCALLY")으로 내보낼 수 있습니다.</div>
 """), "📂 폴더 / 기타")
 
         lay.addWidget(tabs)
