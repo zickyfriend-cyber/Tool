@@ -12,7 +12,13 @@
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); [print\\(s.get\\(''''codec_name''''\\), s.get\\(''''codec_type''''\\), s.get\\(''''width'''',''''''''\\), s.get\\(''''height'''',''''''''\\), s.get\\(''''pix_fmt'''',''''''''\\)\\) for s in d.get\\(''''streams'''',[]\\)]\")",
       "Bash(FFPROBE=\"C:\\\\Users\\\\aramiya\\\\Documents\\\\GitHub\\\\Tool\\\\YTClipDownloader\\\\ytdlp\\\\ffprobe.exe\")",
       "Bash(\"$FFPROBE\" -v error -show_entries stream=codec_name,profile,level,pix_fmt,color_transfer,color_primaries,color_space,bits_per_raw_sample -of default \"C:\\\\Users\\\\aramiya\\\\Videos\\\\참고영상\\\\KD레퍼런스\\\\고요요전투씬.mp4\")",
-      "Bash(del \"c:\\\\Users\\\\aramiya\\\\Documents\\\\GitHub\\\\Tool\\\\YTClipDownloader\\\\version.txt\")"
+      "Bash(del \"c:\\\\Users\\\\aramiya\\\\Documents\\\\GitHub\\\\Tool\\\\YTClipDownloader\\\\version.txt\")",
+      "Bash(curl -s https://api.github.com/repos/zickyfriend-cyber/Tool)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''default_branch:'''', d.get\\(''''default_branch''''\\)\\)\")",
+      "Bash(curl -si https://api.github.com/repos/zickyfriend-cyber/Tool/contents/YTClipDownloader/main.py)",
+      "Bash(curl -si https://api.github.com/repos/zickyfriend-cyber/Tool/contents/YTClipDownloader/main.py?ref=master)",
+      "Bash(curl -si https://api.github.com/repos/zickyfriend-cyber/Tool)",
+      "Bash(curl -si https://raw.githubusercontent.com/zickyfriend-cyber/Tool/main/YTClipDownloader/main.py)"
     ]
   }
 }
