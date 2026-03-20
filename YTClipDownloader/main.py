@@ -3414,9 +3414,15 @@ v.addEventListener('click',function(){{togglePlay();}});
                 if local_sha:
                     self._save_local_sha(local_sha)
             if local_sha and remote_sha != local_sha:
-                self._log("🔔 업데이트가 있습니다. [도구 → 프로그램 업데이트 확인]")
-                self.statusBar().showMessage(
-                    "🔔 업데이트 가능  (도구 → 프로그램 업데이트 확인)", 30000)
+                self._log("🔔 업데이트가 있습니다.")
+                def _ask():
+                    ret = QMessageBox.question(
+                        self, "업데이트 가능",
+                        "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
+                        QMessageBox.Yes | QMessageBox.No)
+                    if ret == QMessageBox.Yes:
+                        self._do_update(remote_sha, download_url)
+                QTimer.singleShot(0, _ask)
         threading.Thread(target=_run, daemon=True).start()
 
     def _check_update_manual(self):
