@@ -3369,32 +3369,51 @@ v.addEventListener('click',function(){{togglePlay();}});
             pass
 
     @staticmethod
+    def _compute_local_sha() -> str:
+        """실행 중인 main.py의 GitHub blob SHA 계산 (SHA1 of 'blob {size}\\0{content}').
+        _installed_sha.txt 없이도 로컬 파일 버전을 정확히 판단할 수 있다."""
+        try:
+            import hashlib
+            path = os.path.abspath(__file__)
+            with open(path, 'rb') as f:
+                data = f.read()
+            header = f"blob {len(data)}\0".encode()
+            return hashlib.sha1(header + data).hexdigest()
+        except Exception:
+            return ''
+
+    @staticmethod
     def _fetch_remote_sha() -> tuple:
         """GitHub API로 main.py의 최신 blob SHA와 다운로드 URL 반환.
-        반환: (sha, download_url) 또는 ('', '') on error."""
+        반환: (sha, download_url, errmsg). 성공 시 errmsg=''."""
         try:
             import urllib.request, json
             req = urllib.request.Request(
                 _GH_API_FILE,
                 headers={'User-Agent': 'ClipDownloader-Updater'})
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 info = json.loads(r.read().decode('utf-8'))
-            return info.get('sha', ''), info.get('download_url', _SCRIPT_URL)
-        except Exception:
-            return '', ''
+            sha = info.get('sha', '')
+            url = info.get('download_url', _SCRIPT_URL)
+            if not sha:
+                return '', '', 'SHA를 찾을 수 없습니다 (GitHub API 응답 이상)'
+            return sha, url, ''
+        except Exception as e:
+            return '', '', str(e)
 
     def _check_update_background(self):
         """시작 시 백그라운드에서 변경 감지 (UI 블로킹 없음)."""
         def _run():
-            remote_sha, _ = self._fetch_remote_sha()
+            remote_sha, _, err = self._fetch_remote_sha()
             if not remote_sha:
                 return
             local_sha = self._load_local_sha()
-            # 최초 실행 시: 현재 파일을 기준으로 SHA 저장 (업데이트 알림 없음)
             if not local_sha:
-                self._save_local_sha(remote_sha)
-                return
-            if remote_sha != local_sha:
+                # 최초 실행: 현재 파일의 실제 SHA로 초기화
+                local_sha = self._compute_local_sha()
+                if local_sha:
+                    self._save_local_sha(local_sha)
+            if local_sha and remote_sha != local_sha:
                 self._log("🔔 업데이트가 있습니다. [도구 → 프로그램 업데이트 확인]")
                 self.statusBar().showMessage(
                     "🔔 업데이트 가능  (도구 → 프로그램 업데이트 확인)", 30000)
@@ -3402,14 +3421,21 @@ v.addEventListener('click',function(){{togglePlay();}});
 
     def _check_update_manual(self):
         """도구 메뉴에서 수동으로 업데이트 확인."""
-        self._log("── 업데이트 확인 중... ──")
+        self._log("── 업데이트 확인 중 (GitHub 연결 중...) ──")
         def _run():
-            remote_sha, download_url = self._fetch_remote_sha()
+            remote_sha, download_url, err = self._fetch_remote_sha()
             if not remote_sha:
+                self._log(f"✘ 업데이트 확인 실패: {err}")
                 QTimer.singleShot(0, lambda: QMessageBox.warning(self, "업데이트 확인 실패",
-                    "GitHub에 연결할 수 없습니다.\n인터넷 연결을 확인해주세요."))
+                    f"GitHub에 연결할 수 없습니다.\n\n{err}"))
                 return
             local_sha = self._load_local_sha()
+            if not local_sha:
+                local_sha = self._compute_local_sha()
+                if local_sha:
+                    self._save_local_sha(local_sha)
+            self._log(f"  로컬 SHA : {local_sha[:12]}…")
+            self._log(f"  원격 SHA : {remote_sha[:12]}…")
             if not local_sha or remote_sha != local_sha:
                 def _ask():
                     ret = QMessageBox.question(
