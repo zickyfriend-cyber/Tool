@@ -1463,7 +1463,8 @@ class MainWindow(QMainWindow):
             if not self._queue_running:
                 self.queue_add_btn.setEnabled(True)
             player_url = f"http://127.0.0.1:{_SERVER_PORT}/"
-            if not self.web.url().toString().startswith(player_url):
+            current = self.web.url().toString()
+            if current.rstrip('/') != player_url.rstrip('/'):
                 self.web.setUrl(QUrl(player_url))
         self._update_overlay()
 
