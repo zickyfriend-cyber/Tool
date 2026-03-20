@@ -6,3 +6,6 @@ YTClipDownloader/main.py.bak
 
 # QtWebEngine 런타임 캐시
 YTClipDownloader/.webengine/
+
+# Claude Code 프로젝트 설정
+.claude/
