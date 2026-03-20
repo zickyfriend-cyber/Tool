@@ -101,6 +101,10 @@ def _start_server():
 # Paths
 # ---------------------------------------------------------------------------
 APP_VERSION  = "1.2"
+_GH_RAW      = "https://raw.githubusercontent.com/zickyfriend-cyber/Tool/main/YTClipDownloader"
+_SCRIPT_URL  = f"{_GH_RAW}/main.py"
+_GH_API_FILE = "https://api.github.com/repos/zickyfriend-cyber/Tool/contents/YTClipDownloader/main.py"
+_SHA_CACHE   = None   # 런타임 캐시 (프로세스 재시작 전까지 유지)
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -777,6 +781,8 @@ class MainWindow(QMainWindow):
         self._setup_timers()
         self._fetch_versions()
         self._restore_settings()
+        # 시작 시 백그라운드 업데이트 확인 (3초 후, UI 로드 완료 후)
+        QTimer.singleShot(3000, self._check_update_background)
         _ver = QLabel(f"  v{APP_VERSION}  ")
         _ver.setStyleSheet("color:#7ec8e3; font-size:11px;")
         self.statusBar().addPermanentWidget(_ver)
@@ -1341,6 +1347,8 @@ class MainWindow(QMainWindow):
         tool_menu.addSeparator()
         tool_menu.addAction("yt-dlp 업데이트", self._update_ytdlp)
         tool_menu.addAction("ffmpeg 업데이트 방법...", self._show_ffmpeg_update_help)
+        tool_menu.addSeparator()
+        tool_menu.addAction("프로그램 업데이트 확인", self._check_update_manual)
 
     def _hline(self):
         f = QFrame(); f.setFrameShape(QFrame.HLine); f.setFrameShadow(QFrame.Sunken)
@@ -3338,6 +3346,127 @@ v.addEventListener('click',function(){{togglePlay();}});
     # -----------------------------------------------------------------------
     # Update tools
     # -----------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # 자동 업데이트 (GitHub blob SHA 비교 — 버전 번호 수동 관리 불필요)
+    # -----------------------------------------------------------------------
+    def _load_local_sha(self) -> str:
+        """마지막으로 설치된 main.py의 GitHub blob SHA (로컬 캐시 파일)."""
+        sha_file = os.path.join(BASE_DIR, '_installed_sha.txt')
+        if os.path.isfile(sha_file):
+            try:
+                return open(sha_file, 'r').read().strip()
+            except Exception:
+                pass
+        return ''
+
+    def _save_local_sha(self, sha: str):
+        sha_file = os.path.join(BASE_DIR, '_installed_sha.txt')
+        try:
+            with open(sha_file, 'w') as f:
+                f.write(sha)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fetch_remote_sha() -> tuple:
+        """GitHub API로 main.py의 최신 blob SHA와 다운로드 URL 반환.
+        반환: (sha, download_url) 또는 ('', '') on error."""
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                _GH_API_FILE,
+                headers={'User-Agent': 'ClipDownloader-Updater'})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                info = json.loads(r.read().decode('utf-8'))
+            return info.get('sha', ''), info.get('download_url', _SCRIPT_URL)
+        except Exception:
+            return '', ''
+
+    def _check_update_background(self):
+        """시작 시 백그라운드에서 변경 감지 (UI 블로킹 없음)."""
+        def _run():
+            remote_sha, _ = self._fetch_remote_sha()
+            if not remote_sha:
+                return
+            local_sha = self._load_local_sha()
+            # 최초 실행 시: 현재 파일을 기준으로 SHA 저장 (업데이트 알림 없음)
+            if not local_sha:
+                self._save_local_sha(remote_sha)
+                return
+            if remote_sha != local_sha:
+                self._log("🔔 업데이트가 있습니다. [도구 → 프로그램 업데이트 확인]")
+                self.statusBar().showMessage(
+                    "🔔 업데이트 가능  (도구 → 프로그램 업데이트 확인)", 30000)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _check_update_manual(self):
+        """도구 메뉴에서 수동으로 업데이트 확인."""
+        self._log("── 업데이트 확인 중... ──")
+        def _run():
+            remote_sha, download_url = self._fetch_remote_sha()
+            if not remote_sha:
+                QTimer.singleShot(0, lambda: QMessageBox.warning(self, "업데이트 확인 실패",
+                    "GitHub에 연결할 수 없습니다.\n인터넷 연결을 확인해주세요."))
+                return
+            local_sha = self._load_local_sha()
+            if not local_sha or remote_sha != local_sha:
+                def _ask():
+                    ret = QMessageBox.question(
+                        self, "업데이트 가능",
+                        "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
+                        QMessageBox.Yes | QMessageBox.No)
+                    if ret == QMessageBox.Yes:
+                        self._do_update(remote_sha, download_url)
+                QTimer.singleShot(0, _ask)
+            else:
+                self._log("✔ 최신 버전입니다.")
+                QTimer.singleShot(0, lambda: QMessageBox.information(self, "업데이트", "최신 버전입니다."))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_update(self, new_sha: str, download_url: str):
+        """main.py를 GitHub에서 다운로드하여 교체 후 재시작."""
+        self._log("⬇ 업데이트 다운로드 중...")
+        def _run():
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    download_url,
+                    headers={'User-Agent': 'ClipDownloader-Updater'})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    data = r.read()
+            except Exception as e:
+                self._log(f"✘ 다운로드 실패: {e}")
+                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패", f"다운로드 오류:\n{e}"))
+                return
+            # 문법 검사
+            try:
+                import ast
+                ast.parse(data.decode('utf-8'))
+            except SyntaxError as e:
+                self._log(f"✘ 다운로드된 파일 오류: {e}")
+                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패", f"파일이 손상되었습니다:\n{e}"))
+                return
+            # 기존 파일 백업 후 교체
+            script_path = os.path.abspath(__file__)
+            try:
+                import shutil
+                shutil.copy2(script_path, script_path + '.bak')
+                with open(script_path, 'wb') as f:
+                    f.write(data)
+                self._save_local_sha(new_sha)
+                self._log("✔ 업데이트 완료. 재시작합니다...")
+                def _restart():
+                    QMessageBox.information(self, "업데이트 완료",
+                        "업데이트가 완료되었습니다.\n프로그램을 재시작합니다.")
+                    import subprocess as _sp
+                    _sp.Popen([sys.executable, script_path] + sys.argv[1:])
+                    QApplication.quit()
+                QTimer.singleShot(0, _restart)
+            except Exception as e:
+                self._log(f"✘ 파일 교체 실패: {e}")
+                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패",
+                    f"파일 교체 중 오류:\n{e}\n\n수동으로 main.py를 교체해주세요."))
+
     def _update_ytdlp(self):
         self._log("── yt-dlp 업데이트 확인 중... ──")
         proc = QProcess(self)
