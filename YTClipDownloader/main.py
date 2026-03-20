@@ -30,9 +30,63 @@ def _find_free_port():
 _SERVER_PORT = _find_free_port()
 _HTML_BYTES: bytes = b''
 _WIN_MUTEX   = None   # 다중 인스턴스 감지용 Windows 뮤텍스 핸들
+_LOCAL_VIDEO_PATH: str = ''   # HTTP 서버에서 서빙할 로컬 영상 경로
+_LOCAL_VIDEO_HTML: bytes = b''  # 해당 영상용 플레이어 HTML
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # 쿼리스트링 제거 (캐시 버스팅용 ?t=N 무시)
+        clean_path = self.path.split('?')[0]
+        # /video  — 로컬 파일 HTTP 서빙 (Range 요청 지원)
+        if clean_path in ('/video', '/video.mp4'):
+            path = _LOCAL_VIDEO_PATH
+            if not path or not os.path.isfile(path):
+                self.send_response(404)
+                self.end_headers()
+                return
+            size = os.path.getsize(path)
+            # Range 헤더 파싱
+            range_header = self.headers.get('Range', '')
+            start, end = 0, size - 1
+            if range_header.startswith('bytes='):
+                parts = range_header[6:].split('-')
+                try:
+                    start = int(parts[0]) if parts[0] else 0
+                    end   = int(parts[1]) if len(parts) > 1 and parts[1] else size - 1
+                except ValueError:
+                    pass
+            length = end - start + 1
+            status = 206 if range_header else 200
+            self.send_response(status)
+            ext = os.path.splitext(path)[1].lower()
+            mime = {'mp4': 'video/mp4', 'webm': 'video/webm', 'mkv': 'video/x-matroska'}.get(ext[1:], 'video/mp4')
+            self.send_header('Content-Type', mime)
+            self.send_header('Content-Length', str(length))
+            self.send_header('Accept-Ranges', 'bytes')
+            if range_header:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.end_headers()
+            try:
+                with open(path, 'rb') as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass  # 브라우저가 Range 요청 완료 후 연결 끊는 건 정상
+            return
+        # /local_player  — 로컬 영상 플레이어 HTML
+        if clean_path == '/local_player':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(_LOCAL_VIDEO_HTML)
+            return
+        # /  — YouTube 플레이어 HTML
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -65,6 +119,16 @@ FFMPEG_EXE  = os.path.join(YTDLP_DIR, 'ffmpeg.exe')
 def secs_to_hms(s: float) -> str:
     s = max(0, int(s))
     return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+
+def secs_to_duration(s: float) -> str:
+    """재생 길이를 간결하게 표시 (예: 5초, 1:23, 1:02:03)."""
+    s = max(0, int(s))
+    if s < 60:
+        return f"{s}초"
+    elif s < 3600:
+        return f"{s//60}:{s%60:02d}"
+    else:
+        return f"{s//3600}:{(s%3600)//60:02d}:{s%60:02d}"
 
 def hms_to_secs(t: str) -> int:
     parts = t.strip().split(':')
@@ -185,12 +249,16 @@ function onYouTubeIframeAPIReady(){
   if(pendingId){_create(pendingId);pendingId=null;}
 }
 var _ytError=null;
+function _setHQ(p){
+  try{p.setPlaybackQuality('hd1080');}catch(e){}
+}
 function _create(id){
   player=new YT.Player('player',{
     videoId:id, width:'100%', height:'100%',
-    playerVars:{playsinline:1, rel:0},
+    playerVars:{playsinline:1, rel:0, vq:'hd1080'},
     events:{
-      onReady:function(e){e.target.playVideo();},
+      onReady:function(e){e.target.playVideo();_setHQ(e.target);},
+      onStateChange:function(e){if(e.data===1)_setHQ(e.target);},
       onError:function(e){_ytError=e.data;}
     }
   });
@@ -199,8 +267,10 @@ function getYTError(){return _ytError;}
 function clearYTError(){_ytError=null;}
 function loadVideo(id){
   if(!ytReady){pendingId=id;return;}
-  if(player&&player.loadVideoById){player.loadVideoById(id);}
-  else{_create(id);}
+  if(player&&player.loadVideoById){
+    player.loadVideoById({videoId:id,suggestedQuality:'hd1080'});
+    _setHQ(player);
+  }else{_create(id);}
 }
 function getCurrentTime()   { return (player&&player.getCurrentTime)?player.getCurrentTime():0; }
 function getDuration()      { return (player&&player.getDuration)?player.getDuration():0; }
@@ -243,11 +313,11 @@ class RangeSlider(QWidget):
     HH = 12   # handle half-height (total: 24px)
     TH = 7    # track height px
     R  = HW   # alias used in geometry (keep compat)
-    CY = 22   # fixed track center y (아래 시간 레이블 공간 확보)
+    CY = 32   # fixed track center y (위 구간길이 + 아래 시간 레이블 공간 확보)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(54)
+        self.setMinimumHeight(64)
         self.setMouseTracking(True)
         self._min   = 0
         self._max   = 600
@@ -344,23 +414,32 @@ class RangeSlider(QWidget):
         p.setPen(QPen(QColor('#fff'), 1.5))
         p.drawRoundedRect(int(xe_d - hw), cy - hh, 2*hw, 2*hh, 3, 3)
 
-        # 드래그 중 핸들 아래 시간 레이블
+        # 드래그 중인 핸들 아래 시간 레이블 + 위에 구간 길이 (드래그 중인 것만 표시)
         if self._drag is not None:
             font = p.font()
             font.setPointSize(8)
             p.setFont(font)
             fm = p.fontMetrics()
-            ty = cy + hh + 3  # 핸들 하단 바로 아래
-            for val, xd, color in (
-                (self._start, xs_d, '#5bb8ff'),
-                (self._end,   xe_d, '#ff7a70'),
-            ):
-                text = secs_to_hms(val)
-                tw = fm.horizontalAdvance(text)
-                tx = int(xd - tw / 2)
-                tx = max(0, min(tx, self.width() - tw))
-                p.setPen(QColor(color))
-                p.drawText(tx, ty + fm.ascent(), text)
+            if self._drag == 'start':
+                val, xd, color = self._start, xs_d, '#5bb8ff'
+            else:
+                val, xd, color = self._end, xe_d, '#ff7a70'
+
+            # 핸들 아래: 현재 시간
+            text = secs_to_hms(val)
+            tw = fm.horizontalAdvance(text)
+            tx = int(xd - tw / 2)
+            tx = max(0, min(tx, self.width() - tw))
+            p.setPen(QColor(color))
+            p.drawText(tx, cy + hh + 3 + fm.ascent(), text)
+
+            # 핸들 위: 구간 길이
+            dur_text = secs_to_duration(self._end - self._start)
+            dw = fm.horizontalAdvance(dur_text)
+            dx = int(xd - dw / 2)
+            dx = max(0, min(dx, self.width() - dw))
+            p.setPen(QColor('#aaa'))
+            p.drawText(dx, cy - hh - 3, dur_text)
 
         p.end()
 
@@ -642,8 +721,15 @@ class DroppableWebView(QWebEngineView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Clip Downloader v{APP_VERSION}  (YouTube / Facebook / 외)")
+        self.setWindowTitle(f"Clip Downloader v{APP_VERSION}  (YouTube / Instagram / TikTok / 외)")
         self.resize(1200, 960)
+        # 이전 세션에서 남은 프록시 임시 파일 정리
+        for f in os.listdir(BASE_DIR):
+            if f.startswith('_preview_proxy_') and (f.endswith('.webm') or f.endswith('.mp4')):
+                try:
+                    os.remove(os.path.join(BASE_DIR, f))
+                except Exception:
+                    pass
         self._duration      = 600
         self._yt_loaded     = False
         self._upd_start     = False
@@ -663,6 +749,7 @@ class MainWindow(QMainWindow):
         self._new_file_paths: set = set()
         self._last_saved_path = None
         self._gif_proxy_mode = False  # GIF→MP4 프록시 변환 완료 후 autoplay 제어용
+        self._proxy_counter  = 0      # 프록시 파일 고유 번호 (캐시 충돌 방지)
         # 오디오 유무 캐시 (path -> True/False)
         self._audio_cache: dict = {}
         self._audio_pending: list = []   # 확인 대기 중인 파일 경로
@@ -734,14 +821,23 @@ class MainWindow(QMainWindow):
         top_lay.setContentsMargins(12, 12, 12, 4)
         self._left_splitter.addWidget(_top_w)
 
-        # ── 소스 선택 ─────────────────────────────────────────────────────────
+        # ── 소스 선택 (토글 버튼) ─────────────────────────────────────────────
         src_row = QHBoxLayout()
-        src_row.addWidget(QLabel("입력 소스:"))
-        self.src_combo = QComboBox()
-        self.src_combo.addItems(['URL  (YouTube / Facebook 등)', '로컬 파일'])
-        self.src_combo.setFixedWidth(220)
-        self.src_combo.currentIndexChanged.connect(self._on_source_changed)
-        src_row.addWidget(self.src_combo)
+        self._src_url_btn   = QPushButton("🌐 URL")
+        self._src_local_btn = QPushButton("📁 로컬 파일")
+        for btn in (self._src_url_btn, self._src_local_btn):
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setStyleSheet(
+                "QPushButton{border:1px solid #555;border-radius:4px;padding:0 10px;background:#2b2b2b;color:#ccc;}"
+                "QPushButton:checked{background:#0066cc;color:#fff;border-color:#0055aa;}"
+                "QPushButton:hover:!checked{background:#3a3a3a;}"
+            )
+        self._src_url_btn.setChecked(True)
+        self._src_url_btn.clicked.connect(lambda: self._set_source(0))
+        self._src_local_btn.clicked.connect(lambda: self._set_source(1))
+        src_row.addWidget(self._src_url_btn)
+        src_row.addWidget(self._src_local_btn)
         src_row.addStretch()
         self._pin_btn = QPushButton("📌 항상 위")
         self._pin_btn.setCheckable(True)
@@ -837,9 +933,11 @@ class MainWindow(QMainWindow):
         self.start_in.setFixedSize(100, H)
         self.start_in.textEdited.connect(self._on_start_text)
         row3.addWidget(self.start_in)
-        b = QPushButton("현재→시작"); b.setFixedSize(110, H); b.clicked.connect(self._set_start_from_cur)
+        b = QPushButton("📍시작"); b.setFixedSize(72, H); b.clicked.connect(self._set_start_from_cur)
+        b.setToolTip("현재 재생 위치를 시작 시간으로 지정")
         row3.addWidget(b)
-        b = QPushButton("▶ 확인"); b.setFixedSize(72, H); b.clicked.connect(self._seek_start)
+        b = QPushButton("↵ 이동"); b.setFixedSize(66, H); b.clicked.connect(self._seek_start)
+        b.setToolTip("입력한 시작 시간으로 이동")
         row3.addWidget(b)
 
         row3.addSpacing(16)
@@ -849,9 +947,11 @@ class MainWindow(QMainWindow):
         self.end_in.setFixedSize(100, H)
         self.end_in.textEdited.connect(self._on_end_text)
         row3.addWidget(self.end_in)
-        b = QPushButton("현재→종료"); b.setFixedSize(110, H); b.clicked.connect(self._set_end_from_cur)
+        b = QPushButton("📍종료"); b.setFixedSize(72, H); b.clicked.connect(self._set_end_from_cur)
+        b.setToolTip("현재 재생 위치를 종료 시간으로 지정")
         row3.addWidget(b)
-        b = QPushButton("▶ 확인"); b.setFixedSize(72, H); b.clicked.connect(self._seek_end_confirm)
+        b = QPushButton("↵ 이동"); b.setFixedSize(66, H); b.clicked.connect(self._seek_end_confirm)
+        b.setToolTip("입력한 종료 시간으로 이동")
         row3.addWidget(b)
 
         row3.addStretch()
@@ -1047,6 +1147,19 @@ class MainWindow(QMainWindow):
         hdr.addWidget(btn_ref)
         folder_lay.addLayout(hdr)
 
+        path_row = QHBoxLayout()
+        self._folder_path_lbl = QLabel(DOWNLOAD_DIR)
+        self._folder_path_lbl.setFont(f_small)
+        self._folder_path_lbl.setStyleSheet("color: #888;")
+        self._folder_path_lbl.setWordWrap(False)
+        self._folder_path_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        path_row.addWidget(self._folder_path_lbl)
+        btn_open_folder = QPushButton("폴더 열기")
+        btn_open_folder.setFixedWidth(72)
+        btn_open_folder.clicked.connect(self._open_save_folder)
+        path_row.addWidget(btn_open_folder)
+        folder_lay.addLayout(path_row)
+
         self.file_tree = FileTree()
         self.file_tree.setColumnCount(5)
         self.file_tree.setHeaderLabels(["이름", "확장자", "크기", "날짜", "♪"])
@@ -1122,15 +1235,17 @@ class MainWindow(QMainWindow):
         vid_q_lay.addLayout(vid_q_hdr)
 
         self.queue_tree = QTreeWidget()
-        self.queue_tree.setColumnCount(5)
-        self.queue_tree.setHeaderLabels(["#", "URL/파일", "구간", "형식", "상태"])
+        self.queue_tree.setColumnCount(7)
+        self.queue_tree.setHeaderLabels(["#", "URL/파일", "구간", "길이", "예상크기", "형식", "상태"])
         self.queue_tree.setAlternatingRowColors(True)
         self.queue_tree.setFont(f_small)
         self.queue_tree.setColumnWidth(0, 30)
-        self.queue_tree.setColumnWidth(1, 220)
+        self.queue_tree.setColumnWidth(1, 200)
         self.queue_tree.setColumnWidth(2, 100)
-        self.queue_tree.setColumnWidth(3, 60)
-        self.queue_tree.setColumnWidth(4, 80)
+        self.queue_tree.setColumnWidth(3, 55)
+        self.queue_tree.setColumnWidth(4, 65)
+        self.queue_tree.setColumnWidth(5, 55)
+        self.queue_tree.setColumnWidth(6, 70)
         self.queue_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.queue_tree.customContextMenuRequested.connect(self._on_queue_context)
         self.queue_tree.itemDoubleClicked.connect(self._on_queue_item_double_click)
@@ -1163,15 +1278,17 @@ class MainWindow(QMainWindow):
         gif_q_lay.addLayout(gif_q_hdr)
 
         self.gif_queue_tree = QTreeWidget()
-        self.gif_queue_tree.setColumnCount(5)
-        self.gif_queue_tree.setHeaderLabels(["#", "URL/파일", "구간", "설정", "상태"])
+        self.gif_queue_tree.setColumnCount(7)
+        self.gif_queue_tree.setHeaderLabels(["#", "URL/파일", "구간", "길이", "예상크기", "설정", "상태"])
         self.gif_queue_tree.setAlternatingRowColors(True)
         self.gif_queue_tree.setFont(f_small)
         self.gif_queue_tree.setColumnWidth(0, 30)
-        self.gif_queue_tree.setColumnWidth(1, 220)
+        self.gif_queue_tree.setColumnWidth(1, 200)
         self.gif_queue_tree.setColumnWidth(2, 100)
-        self.gif_queue_tree.setColumnWidth(3, 80)
-        self.gif_queue_tree.setColumnWidth(4, 80)
+        self.gif_queue_tree.setColumnWidth(3, 55)
+        self.gif_queue_tree.setColumnWidth(4, 65)
+        self.gif_queue_tree.setColumnWidth(5, 75)
+        self.gif_queue_tree.setColumnWidth(6, 70)
         self.gif_queue_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.gif_queue_tree.customContextMenuRequested.connect(self._on_gif_queue_context)
         self.gif_queue_tree.itemDoubleClicked.connect(self._on_gif_queue_item_double_click)
@@ -1212,6 +1329,8 @@ class MainWindow(QMainWindow):
 
         self.path_input.lineEdit().editingFinished.connect(self._refresh_file_list)
         self.path_input.currentIndexChanged.connect(self._refresh_file_list)
+        self.path_input.lineEdit().editingFinished.connect(self._update_folder_path_lbl)
+        self.path_input.currentIndexChanged.connect(self._update_folder_path_lbl)
         QTimer.singleShot(200, self._refresh_file_list)
 
         # ── 메뉴바: 도구 ─────────────────────────────────────────────────────
@@ -1313,6 +1432,12 @@ class MainWindow(QMainWindow):
 
     # Source mode switch
     # -----------------------------------------------------------------------
+    def _set_source(self, idx: int):
+        """토글 버튼 클릭 → 버튼 상태 동기화 후 _on_source_changed 호출."""
+        self._src_url_btn.setChecked(idx == 0)
+        self._src_local_btn.setChecked(idx == 1)
+        self._on_source_changed(idx)
+
     def _on_source_changed(self, idx: int):
         self._mode = 'local' if idx == 1 else 'url'
         self.url_widget.setVisible(self._mode == 'url')
@@ -1323,6 +1448,9 @@ class MainWindow(QMainWindow):
         if self._mode == 'url':
             self._yt_loaded = False
             self._local_is_gif = False
+            self.ext_combo.setEnabled(True)
+            self.gif_fps.setEnabled(True)
+            self.gif_width.setEnabled(True)
             self.dl_btn.setText("구간 저장 (다운로드)")
             if not self._queue_running:
                 self.queue_add_btn.setEnabled(True)
@@ -1340,6 +1468,7 @@ class MainWindow(QMainWindow):
             "동영상/GIF (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.m4v *.gif);;모든 파일 (*.*)")
         if path:
             self._local_file = path
+            self._proxy_loaded = False   # 새 파일 → 프록시 상태 초기화
             self.local_path_lbl.setText(path)
             self._load_local_preview(path)
             self.name_input.setText(os.path.splitext(os.path.basename(path))[0])
@@ -1347,15 +1476,14 @@ class MainWindow(QMainWindow):
 
     def _load_local_preview(self, path: str):
         """로컬 영상/GIF 를 웹뷰에 로드."""
-        filename = os.path.basename(path)
-        encoded_filename = _url_quote(filename, safe='')
-        base_url = QUrl.fromLocalFile(os.path.dirname(path) + os.sep)
         self._yt_loaded = True
         self._web_container.hide_overlay()
 
         if path.lower().endswith('.gif'):
-            # GIF는 <img>로 즉시 표시 후 백그라운드에서 MP4 프록시 변환
-            # (변환 완료 후 <video>로 재로드 → 구간 재생/반복 재생 지원)
+            # GIF는 <img>로 즉시 표시 후 백그라운드에서 WebM 프록시 변환
+            filename = os.path.basename(path)
+            encoded_filename = _url_quote(filename, safe='')
+            base_url = QUrl.fromLocalFile(os.path.dirname(path) + os.sep)
             html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 * {{margin:0;padding:0;box-sizing:border-box;}}
@@ -1375,13 +1503,16 @@ function getVideoError()   {{ return null; }}
 </body></html>"""
             self.web.setHtml(html, base_url)
             # duration은 _probe_gif_properties 에서 nb_frames/fps 로 계산
-            # 백그라운드에서 MP4 프록시 변환 시작
+            # 백그라운드에서 WebM 프록시 변환 시작
             self._create_gif_preview_proxy()
         else:
-            # GIF 프록시 로드 시 autoplay 적용
+            # 비디오: 로컬 HTTP 서버로 서빙 (file:// 보안 제한 · CORS 우회)
+            global _LOCAL_VIDEO_PATH, _LOCAL_VIDEO_HTML
+            _LOCAL_VIDEO_PATH = path
             is_gif_proxy = self._gif_proxy_mode
             self._gif_proxy_mode = False
             autoplay_attr = 'autoplay' if is_gif_proxy else ''
+            video_url = f"http://127.0.0.1:{_SERVER_PORT}/video"
             html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 * {{margin:0;padding:0;box-sizing:border-box;}}
@@ -1391,7 +1522,7 @@ video {{width:100%;height:100%;}}
        color:#ff6b6b;background:rgba(0,0,0,.8);padding:14px 18px;border-radius:6px;
        font-size:13px;text-align:center;max-width:80%;}}
 </style></head><body>
-<video id="v" src="{encoded_filename}" controls {autoplay_attr} preload="metadata"></video>
+<video id="v" src="{video_url}" controls {autoplay_attr} preload="metadata"></video>
 <div id="err"></div>
 <script>
 var v = document.getElementById('v');
@@ -1413,7 +1544,22 @@ function togglePlay()      {{ if(v.paused) v.play().catch(function(){{}}); else 
 v.addEventListener('click', function() {{ togglePlay(); }});
 </script>
 </body></html>"""
-            self.web.setHtml(html, base_url)
+            self._video_token = getattr(self, '_video_token', 0) + 1
+            _LOCAL_VIDEO_HTML = html.encode('utf-8')
+            local_player_url = f"http://127.0.0.1:{_SERVER_PORT}/local_player"
+            current_url = self.web.url().toString()
+            if current_url.startswith(local_player_url.split('?')[0]):
+                # 이미 /local_player 페이지 — JS로 video src만 교체 (빠른 전환)
+                new_src = f"http://127.0.0.1:{_SERVER_PORT}/video?t={self._video_token}"
+                js = (f"window._videoError=null;"
+                      f"document.getElementById('err').style.display='none';"
+                      f"var v=document.getElementById('v');"
+                      f"v.src='{new_src}';"
+                      f"v.load();"
+                      + ("v.play().catch(function(){});" if autoplay_attr else ""))
+                self.web.page().runJavaScript(js)
+            else:
+                self.web.setUrl(QUrl(local_player_url))
             if not is_gif_proxy:  # GIF 프록시는 duration 이미 확정 — 재폴링 불필요
                 self._dur_timer.start()
             QTimer.singleShot(3000, self._check_video_error)
@@ -1427,16 +1573,17 @@ v.addEventListener('click', function() {{ togglePlay(); }});
             return
         if self._local_is_gif:
             return  # GIF는 WebM 프록시로 처리 — 오디오 전용 프록시 생성 방지
-        current = getattr(self, '_preview_proxy', '')
-        if current and self._local_file == current:
-            return  # 프록시 자체 로드 시 재귀 방지
+        if getattr(self, '_proxy_loaded', False):
+            return  # 이미 프록시로 성공 로드됨 — 재귀 방지
         self.web.page().runJavaScript("getVideoError();", self._on_video_error_result)
 
     def _on_video_error_result(self, err):
         if err:
-            self._log("⚠ 미리보기 호환 불가 포맷 — 미리보기용 변환 중...")
+            self._log(f"⚠ 미리보기 호환 불가 포맷 ({err}) — VP8/WebM 변환 중...")
             self._web_container.show_overlay("⏳  미리보기 변환 중...")
             self._create_preview_proxy()
+        else:
+            self._log("✔ 미리보기 정상 재생 중")
 
     def _create_gif_preview_proxy(self):
         """GIF → WebM(VP8) 변환 (구간 재생 · 반복 재생 지원용 프록시).
@@ -1444,12 +1591,30 @@ v.addEventListener('click', function() {{ togglePlay(); }});
         """
         if not self._local_file:
             return
-        proxy_path = os.path.join(BASE_DIR, f'_preview_proxy_{os.getpid()}.webm')
+        # 이전 프록시 변환 프로세스가 남아있으면 종료
+        old_proc = getattr(self, '_proxy_proc', None)
+        if old_proc and old_proc.state() != QProcess.NotRunning:
+            try:
+                old_proc.finished.disconnect()
+            except Exception:
+                pass
+            old_proc.kill()
+            old_proc.waitForFinished(1000)
+        # 이전 프록시 파일 삭제 (브라우저 캐시 방지를 위해 매번 고유 경로 사용)
+        old_proxy = getattr(self, '_preview_proxy', '')
+        if old_proxy and os.path.isfile(old_proxy):
+            try:
+                os.remove(old_proxy)
+            except Exception:
+                pass
+        self._proxy_counter += 1
+        proxy_path = os.path.join(BASE_DIR, f'_preview_proxy_{os.getpid()}_{self._proxy_counter}.webm')
         self._preview_proxy = proxy_path
+        self._proxy_source = self._local_file   # 어느 파일용 프록시인지 기록
         self._gif_proxy_mode = True   # _on_proxy_done → _load_local_preview 에서 autoplay 적용
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.finished.connect(lambda *_: self._on_proxy_done())
+        proc.finished.connect(lambda exit_code, _status: self._on_proxy_done(exit_code))
         proc.start(FFMPEG_EXE, [
             '-y', '-i', self._local_file,
             '-c:v', 'libvpx',
@@ -1462,26 +1627,52 @@ v.addEventListener('click', function() {{ togglePlay(); }});
         self._proxy_proc = proc
 
     def _create_preview_proxy(self):
-        """오디오만 AAC 재인코딩해 미리보기 호환 MP4 생성 (영상은 copy → 빠름)."""
+        """비디오를 VP8/Vorbis WebM으로 재인코딩 — Chromium이 항상 지원하는 포맷."""
         if not self._local_file:
             return
+        self._proxy_counter += 1
         proxy_path = os.path.join(
-            BASE_DIR, f'_preview_proxy_{os.getpid()}.mp4')
+            BASE_DIR, f'_preview_proxy_{os.getpid()}_{self._proxy_counter}.webm')
         self._preview_proxy = proxy_path
+        self._proxy_source  = self._local_file
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.finished.connect(lambda *_: self._on_proxy_done())
+        proc.finished.connect(lambda exit_code, _status: self._on_proxy_done(exit_code))
         proc.start(FFMPEG_EXE, [
             '-y', '-i', self._local_file,
-            '-c:v', 'copy', '-c:a', 'aac',
-            '-movflags', 'faststart',
+            '-map', '0:v:0',           # 첫 번째 비디오 스트림
+            '-map', '0:a:0?',          # 오디오 (없으면 건너뜀)
+            '-c:v', 'libvpx',
+            '-deadline', 'realtime',   # 실시간 인코딩 (가장 빠름)
+            '-cpu-used', '8',          # 최대 속도 (0=고화질, 8=고속)
+            '-b:v', '1M',
+            '-vf', 'scale=-2:480',     # 480p — 미리보기용 (720p 대비 2배 빠름)
+            '-pix_fmt', 'yuv420p',
+            '-auto-alt-ref', '0',      # VP8 필수
+            '-c:a', 'libvorbis', '-b:a', '96k',
+            '-map_metadata', '-1',
             proxy_path])
         self._proxy_proc = proc
 
-    def _on_proxy_done(self):
+    def _on_proxy_done(self, exit_code=0):
         proxy = getattr(self, '_preview_proxy', '')
+        # 이미 다른 파일이 로드된 경우 (프록시 완료 전에 새 파일 선택) 무시
+        if getattr(self, '_proxy_source', None) != self._local_file:
+            return
+        if exit_code != 0:
+            # ffmpeg 실패 — stderr 로그 출력
+            proc = getattr(self, '_proxy_proc', None)
+            if proc:
+                err_out = proc.readAll().data().decode('utf-8', errors='replace').strip()
+                if err_out:
+                    self._log(f"[ffmpeg] {err_out[-500:]}")  # 마지막 500자만
+            self._log("✘ 미리보기 변환 실패 — 슬라이더 범위만 설정합니다.")
+            self._web_container.show_overlay("⚠  미리보기 불가")
+            self._probe_local_duration()
+            return
         if proxy and os.path.isfile(proxy):
             self._log("✔ 미리보기 변환 완료")
+            self._proxy_loaded = True   # 에러 체크 루프 방지
             self._load_local_preview(proxy)
             if self._pending_gif_seek:
                 self._pending_gif_seek = False
@@ -1541,7 +1732,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
     # Video loading (URL mode)
     # -----------------------------------------------------------------------
     def load_video(self):
-        url = self.url_input.currentText().strip()
+        url = (self.url_input.currentData() or self.url_input.currentText()).strip()
         if not url:
             return
         self._add_recent_url(url)
@@ -1596,6 +1787,8 @@ v.addEventListener('click', function() {{ togglePlay(); }});
     def _apply_video_title(self, title: str):
         if title and title.strip():
             self.name_input.setText(title.strip())
+            url = self.url_input.currentData() or self.url_input.currentText().strip()
+            self._update_recent_url_title(url, title.strip())
 
     def _check_yt_embed_error(self):
         """YouTube 로드 4초 후 embed 차단 오류 여부 확인."""
@@ -1643,6 +1836,8 @@ v.addEventListener('click', function() {{ togglePlay(); }});
         title = info.get('title') or ''
         if title:
             self.name_input.setText(title.strip())
+            url = self.url_input.currentData() or self.url_input.currentText().strip()
+            self._update_recent_url_title(url, title.strip())
 
         dur = info.get('duration')
         if dur:
@@ -1650,13 +1845,18 @@ v.addEventListener('click', function() {{ togglePlay(); }});
             self._reset_slider(self._duration)
             self._update_size_estimate()
 
-        stream_url = self._pick_stream_url(info)
+        stream_url, is_hls = self._pick_stream_url(info)
         if not stream_url:
             self._log("직접 재생 가능한 스트림 없음 — 다운로드는 가능합니다.")
             self._web_container.show_overlay("⚠ 미리보기 불가 — 다운로드는 가능합니다")
             return
 
-        # HTML5 video 플레이어 로드 (로컬 파일 플레이어와 동일한 JS API)
+        if is_hls:
+            self._log("HLS 스트림 — 미리보기 불가. 구간 직접 입력 후 저장하세요.")
+            self._web_container.show_overlay("⚠ 미리보기 불가 (HLS 스트림)\n구간을 직접 입력 후 저장하세요")
+            self._yt_loaded = True  # 슬라이더/저장 버튼 활성화
+            return
+
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 *{{margin:0;padding:0;box-sizing:border-box;}}
@@ -1674,8 +1874,7 @@ var errDiv=document.getElementById('err');
 window._videoError=null;
 v.onerror=function(){{
   var msg=v.error?('코드 '+v.error.code+': '+(v.error.message||'재생 불가')):'알 수 없는 오류';
-  window._videoError=msg;
-  errDiv.style.display='block';
+  window._videoError=msg;errDiv.style.display='block';
   errDiv.textContent='⚠ 미리보기 불가  ('+msg+')';
 }};
 function getCurrentTime(){{return v.currentTime||0;}}
@@ -1698,10 +1897,13 @@ v.addEventListener('click',function(){{togglePlay();}});
             QTimer.singleShot(500, lambda: self.web.page().runJavaScript(
                 f"setRate({self._speed});"))
 
-    def _pick_stream_url(self, info: dict) -> str:
-        """formats 에서 직접 재생 가능한 MP4/WebM URL 선택 (≤720p 우선)."""
+    def _pick_stream_url(self, info: dict) -> tuple:
+        """formats 에서 직접 재생 가능한 스트림 URL 선택.
+        반환: (url, is_hls) — HLS(m3u8) 여부를 함께 반환."""
         formats = info.get('formats') or []
-        candidates = []
+
+        # 1순위: 직접 재생 가능한 MP4/WebM
+        direct = []
         for f in formats:
             u = f.get('url', '')
             if not u:
@@ -1709,26 +1911,35 @@ v.addEventListener('click',function(){{togglePlay();}});
             proto = f.get('protocol', '')
             if proto in ('m3u8', 'm3u8_native', 'dash'):
                 continue
-            vcodec = f.get('vcodec', 'unknown')
-            if vcodec == 'none':
-                continue  # 오디오 전용
+            if f.get('vcodec', 'none') == 'none':
+                continue
             ext = f.get('ext', '')
             if ext in ('mp4', 'webm', 'mov', 'ts') or ext == '':
-                candidates.append(f)
+                direct.append(f)
 
-        if not candidates:
-            # 프로토콜 제한 없이 비디오 스트림만 필터
-            candidates = [f for f in formats
-                          if f.get('url') and f.get('vcodec', 'none') != 'none']
+        if not direct:
+            direct = [f for f in formats
+                      if f.get('url') and f.get('vcodec', 'none') != 'none'
+                      and f.get('protocol', '') not in ('m3u8', 'm3u8_native', 'dash')]
 
-        if not candidates:
-            return info.get('url', '')
+        if direct:
+            under720 = [f for f in direct if (f.get('height') or 9999) <= 720]
+            pool = under720 if under720 else direct
+            pool.sort(key=lambda f: (f.get('height') or 0), reverse=True)
+            return pool[0].get('url', ''), False
 
-        # ≤720p 우선, 그 중 가장 높은 해상도
-        under720 = [f for f in candidates if (f.get('height') or 9999) <= 720]
-        pool = under720 if under720 else candidates
-        pool.sort(key=lambda f: (f.get('height') or 0), reverse=True)
-        return pool[0].get('url', '')
+        # 2순위: HLS 스트림 (네이버 TV 등)
+        hls = [f for f in formats
+               if f.get('url') and f.get('protocol', '') in ('m3u8', 'm3u8_native')
+               and f.get('vcodec', 'none') != 'none']
+        if hls:
+            under720 = [f for f in hls if (f.get('height') or 9999) <= 720]
+            pool = under720 if under720 else hls
+            pool.sort(key=lambda f: (f.get('height') or 0), reverse=True)
+            return pool[0].get('url', ''), True
+
+        fallback = info.get('url', '')
+        return fallback, False
 
     # -----------------------------------------------------------------------
     # Duration polling
@@ -1821,36 +2032,39 @@ v.addEventListener('click',function(){{togglePlay();}});
         '960': 5_000_000, '1280': 9_000_000, '원본': 25_000_000,
     }
 
-    def _update_size_estimate(self):
-        clip_secs = max(1, self.rslider.end - self.rslider.start)
-        ext = self.ext_combo.currentText()
-        est = None
-        note = ""
-        mute = self.mute_chk.isChecked()
-        # ext/res에 따른 bps 계산 (모드 공통)
+    def _calc_size_bytes(self, clip_secs: float, ext: str, res: str,
+                          gif_width: str, mute: bool,
+                          local_file: str = '', duration: float = 0) -> int:
+        """주어진 파라미터로 예상 파일 크기(bytes)를 계산."""
         if ext == 'mp3 (오디오만)':
             bps = 16_000
         elif ext == 'gif':
-            bps = self._GIF_BPS.get(self.gif_width.currentText(), 1_000_000)
+            bps = self._GIF_BPS.get(gif_width, 1_000_000)
         else:
-            # 로컬 모드 + 원본 해상도 → 실제 파일 bitrate 사용 (더 정확)
-            res_sel = self.res_combo.currentText()
-            if (self._mode == 'local'
-                    and self._local_file and os.path.isfile(self._local_file)
-                    and self._duration > 1
-                    and res_sel == '최고화질'):
+            if (local_file and os.path.isfile(local_file)
+                    and duration > 1 and res == '최고화질'):
                 try:
-                    bps = os.path.getsize(self._local_file) / self._duration
-                    note = " (참고용, VBR 영상은 실제와 다를 수 있음)"
+                    bps = os.path.getsize(local_file) / duration
                 except OSError:
-                    bps = self._RES_BPS.get(res_sel, 5_000_000)
+                    bps = self._RES_BPS.get(res, 5_000_000)
             else:
-                bps = self._RES_BPS.get(res_sel, 5_000_000)
+                bps = self._RES_BPS.get(res, 5_000_000)
             if mute:
                 bps = max(0, bps - 16_000)
-        est = int(bps * clip_secs)
-        if not note:
-            note = " (참고용)"
+        return int(bps * max(1, clip_secs))
+
+    def _update_size_estimate(self):
+        clip_secs = max(1, self.rslider.end - self.rslider.start)
+        ext = self.ext_combo.currentText()
+        mute = self.mute_chk.isChecked()
+        res_sel = self.res_combo.currentText()
+        local_f = self._local_file if self._mode == 'local' else ''
+        est = self._calc_size_bytes(clip_secs, ext, res_sel,
+                                    self.gif_width.currentText(), mute,
+                                    local_f, self._duration)
+        note = " (참고용, VBR 영상은 실제와 다를 수 있음)" if (
+            local_f and ext not in ('mp3 (오디오만)', 'gif') and res_sel == '최고화질'
+        ) else " (참고용)"
         if est:
             self.size_est_lbl.setText(f"  예상 크기: ~{self._size_str(est)}{note}")
         else:
@@ -1984,14 +2198,26 @@ v.addEventListener('click',function(){{togglePlay();}});
         self.path_input.setCurrentIndex(0)
 
     def _add_recent_url(self, url: str):
-        """URL을 최근 목록 맨 앞에 추가 (최대 8개, 중복 제거)."""
+        """URL을 최근 목록 맨 앞에 추가 (최대 8개, 중복 제거). userData=URL, text=제목(추후 업데이트)."""
         for i in range(self.url_input.count() - 1, -1, -1):
-            if self.url_input.itemText(i) == url:
+            if self.url_input.itemData(i) == url or self.url_input.itemText(i) == url:
                 self.url_input.removeItem(i)
-        self.url_input.insertItem(0, url)
+        self.url_input.insertItem(0, url, url)   # text=URL (제목 오면 덮어씀), data=URL
         while self.url_input.count() > 8:
             self.url_input.removeItem(self.url_input.count() - 1)
         self.url_input.setCurrentIndex(0)
+
+    def _update_recent_url_title(self, url: str, title: str):
+        """히스토리 항목의 표시 텍스트를 제목으로 업데이트."""
+        if not title:
+            return
+        for i in range(self.url_input.count()):
+            if self.url_input.itemData(i) == url:
+                self.url_input.setItemText(i, f"{title}  [{url[:40]}{'…' if len(url)>40 else ''}]")
+                # 현재 선택 항목이면 lineEdit도 URL로 유지 (제목이 입력창에 들어가지 않게)
+                if self.url_input.currentIndex() == i:
+                    self.url_input.lineEdit().setText(url)
+                break
 
     def _open_folder(self):
         import subprocess as _sp
@@ -2102,7 +2328,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         if self._mode == 'local':
             url = self._local_file or ''
         else:
-            url = self.url_input.currentText().strip()
+            url = (self.url_input.currentData() or self.url_input.currentText()).strip()
         if not url:
             self._log("URL 또는 로컬 파일을 먼저 선택하세요.")
             return
@@ -2656,9 +2882,19 @@ v.addEventListener('click',function(){{togglePlay();}});
             return f"{sz / 1024:.0f} KB"
         return f"{sz} B"
 
+    def _update_folder_path_lbl(self):
+        folder = self.path_input.currentText().strip() or DOWNLOAD_DIR
+        self._folder_path_lbl.setText(folder)
+
+    def _open_save_folder(self):
+        folder = self.path_input.currentText().strip() or DOWNLOAD_DIR
+        os.makedirs(folder, exist_ok=True)
+        os.startfile(folder)
+
     def _refresh_file_list(self):
         folder = self.path_input.currentText().strip() or DOWNLOAD_DIR
         self._folder_lbl.setText(f"저장 폴더  ({os.path.basename(folder) or folder})")
+        self._folder_path_lbl.setText(folder)
         self.file_tree.blockSignals(True)
         self.file_tree.clear()
         self.file_tree.blockSignals(False)
@@ -2816,8 +3052,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             if not multi:
                 if top_kind == 'file':
                     menu.addAction("실행", lambda: os.startfile(top_path))
-                    menu.addAction("폴더 열기", lambda: _sp.Popen(
-                        ['explorer', '/select,', os.path.normpath(top_path)]))
+                    menu.addAction("폴더 열기", lambda p=top_path: _sp.Popen(
+                        f'explorer /select,"{os.path.normpath(p)}"', shell=True))
                 else:
                     menu.addAction("열기", lambda: _sp.Popen(
                         ['explorer', os.path.normpath(top_path)]))
@@ -3003,8 +3239,9 @@ v.addEventListener('click',function(){{togglePlay();}});
         if self._process and self._process.state() != QProcess.NotRunning:
             return  # 다운로드 중에는 무시
         self._local_file = path
+        self._proxy_loaded = False   # 새 파일 → 프록시 상태 초기화
         self.local_path_lbl.setText(path)
-        self.src_combo.setCurrentIndex(1)   # 로컬 파일 모드로 전환
+        self._set_source(1)   # 로컬 파일 모드로 전환
         self._load_local_preview(path)
         self.name_input.setText(os.path.splitext(os.path.basename(path))[0])
         self._apply_local_gif_mode(path)
@@ -3049,7 +3286,12 @@ v.addEventListener('click',function(){{togglePlay();}});
         s.setValue("sort_asc", self._sort_asc)
         recent = [self.path_input.itemText(i) for i in range(self.path_input.count())]
         s.setValue("recent_paths", recent)
-        recent_urls = [self.url_input.itemText(i) for i in range(self.url_input.count())]
+        # [(url, display_text), ...] 형태로 저장
+        recent_urls = [
+            [self.url_input.itemData(i) or self.url_input.itemText(i),
+             self.url_input.itemText(i)]
+            for i in range(self.url_input.count())
+        ]
         s.setValue("recent_urls", recent_urls)
 
     def _restore_settings(self):
@@ -3082,9 +3324,14 @@ v.addEventListener('click',function(){{togglePlay();}});
             self.path_input.setCurrentIndex(0)
         recent_urls = s.value("recent_urls", [])
         if isinstance(recent_urls, str):
-            recent_urls = [recent_urls]
+            recent_urls = [[recent_urls, recent_urls]]
         if recent_urls:
-            self.url_input.addItems(recent_urls)
+            for entry in recent_urls:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    url, display = entry[0], entry[1]
+                else:
+                    url = display = str(entry)  # 구버전 호환
+                self.url_input.addItem(display, url)
             self.url_input.setCurrentIndex(-1)
             self.url_input.lineEdit().clear()
 
@@ -3138,14 +3385,15 @@ v.addEventListener('click',function(){{togglePlay();}});
 <h2>📥 영상 로드</h2>
 <h3>URL 모드</h3>
 <ul>
-  <li>YouTube, Facebook 등 URL을 상단 입력창에 붙여넣고 <b>로드</b> 클릭</li>
-  <li>URL을 입력하면 자동으로 클립보드 감지 후 알림</li>
+  <li>상단 <b>🌐 URL</b> 버튼 선택 후 URL 입력창에 붙여넣고 <b>로드</b> 클릭</li>
+  <li>YouTube URL은 클립보드에 복사되면 자동 감지되어 입력창에 채워짐</li>
+  <li>최근 로드한 URL 드롭다운에 <b>영상 제목</b>으로 표시되어 재접근 편리</li>
 </ul>
 <h3>로컬 파일 모드</h3>
 <ul>
-  <li>소스 콤보박스에서 <b>로컬 파일</b> 선택 후 <b>파일 선택</b> 버튼 클릭</li>
-  <li>미리보기 창으로 파일을 <b>드래그 앤 드롭</b>해서 바로 로드 가능</li>
-  <li>우측 <b>저장 폴더 탭</b>의 파일을 미리보기 창으로 드래그해서 로드 가능</li>
+  <li>상단 <b>📁 로컬 파일</b> 버튼 선택 후 <b>파일 선택</b> 클릭</li>
+  <li>미리보기 창 또는 <b>저장 폴더 탭</b>의 파일을 미리보기 창으로 <b>드래그 앤 드롭</b>해도 바로 로드</li>
+  <li>H.264 이외 코덱(AV1, HEVC 등) 파일은 자동으로 VP8 변환 후 미리보기</li>
 </ul>
 <h3>GIF 파일</h3>
 <ul>
@@ -3161,13 +3409,14 @@ v.addEventListener('click',function(){{togglePlay();}});
 <h3>슬라이더</h3>
 <ul>
   <li>왼쪽 핸들: 시작 시간 &nbsp;/&nbsp; 오른쪽 핸들: 종료 시간</li>
+  <li>핸들 드래그 중 해당 핸들 위에 <b>구간 길이</b>, 아래에 <b>현재 시간</b> 표시</li>
   <li>핸들을 놓으면 해당 위치로 영상이 자동 이동</li>
 </ul>
 <h3>시간 직접 입력</h3>
 <ul>
   <li>시작/종료 입력창에 <b>HH:MM:SS</b> 형식으로 직접 입력</li>
-  <li><b>현재→시작</b> / <b>현재→종료</b> 버튼: 현재 재생 위치를 구간으로 지정</li>
-  <li><b>▶ 확인</b> 버튼: 입력한 시간으로 영상 이동</li>
+  <li><b>📍시작</b> / <b>📍종료</b> 버튼: 현재 재생 위치를 구간 시작/종료로 지정</li>
+  <li><b>↵ 이동</b> 버튼: 입력한 시간으로 영상 이동</li>
 </ul>
 <h3>미리보기 플레이어</h3>
 <ul>
@@ -3200,7 +3449,7 @@ v.addEventListener('click',function(){{togglePlay();}});
 </ul>
 <h3>영상 효과 옵션</h3>
 <ul>
-  <li><b>회전/반전</b>: 90° 시계 / 90° 반시계 / 180° / 좌우 반전 / 상하 반전 — 저장 파일에 적용</li>
+  <li><b>회전/반전</b>: 90° 시계 / 90° 반시계 / 180° / 좌우 반전 / 상하 반전</li>
   <li><b>볼륨</b>: 0.1x ~ 5.0x 범위로 저장 시 오디오 음량 조절 (1.0 = 원본)</li>
   <li><b>압축(CRF)</b>: 0 = 자동(기본), 값이 클수록 용량↓ 화질↓ &nbsp;(권장: 18~28)</li>
 </ul>
@@ -3220,7 +3469,7 @@ v.addEventListener('click',function(){{togglePlay();}});
 <ul>
   <li>구간과 옵션을 설정한 뒤 <b>큐에 추가</b> 버튼 클릭</li>
   <li>여러 구간을 등록한 후 <b>큐 실행</b>으로 한 번에 처리</li>
-  <li>각 항목은 추가 당시의 소스(URL/파일)와 구간을 기억</li>
+  <li>각 항목은 추가 당시의 소스(URL/파일)와 구간, 길이, 예상 크기를 기억</li>
 </ul>
 <h3>구간 합치기</h3>
 <ul>
@@ -3240,11 +3489,11 @@ v.addEventListener('click',function(){{togglePlay();}});
         tabs.addTab(_tab("""
 <h2>📂 저장 폴더 탭</h2>
 <ul>
-  <li>저장된 파일 목록을 실시간으로 표시</li>
-  <li>파일 <b>클릭</b>: 해당 폴더를 탐색기로 열기</li>
+  <li>저장된 파일 목록을 실시간으로 표시 (하위 폴더 포함)</li>
   <li>파일을 미리보기 창으로 <b>드래그</b>하면 바로 로드</li>
-  <li>우클릭 메뉴: 파일 열기 / 폴더 열기 / 삭제 / 이름 변경</li>
+  <li>우클릭 메뉴: <b>실행</b> / <b>폴더 열기</b>(파일 선택된 채로 탐색기 열림) / <b>삭제</b> / <b>이름 변경</b></li>
   <li><b>F2</b>: 이름 변경 &nbsp;/&nbsp; <b>Delete</b>: 삭제 &nbsp;/&nbsp; <b>Enter</b>: 파일 열기</li>
+  <li>상단 <b>현재 저장 경로</b> 표시 및 <b>폴더 열기</b> 버튼으로 빠른 접근</li>
 </ul>
 
 <h2 style='margin-top:22px'>📷 스크린샷</h2>
@@ -3270,6 +3519,54 @@ v.addEventListener('click',function(){{togglePlay();}});
 </ul>
 <div class='tip'>💡 쿠키 파일은 브라우저 확장 프로그램(예: "Get cookies.txt LOCALLY")으로 내보낼 수 있습니다.</div>
 """), "📂 폴더 / 기타")
+
+        # ── 탭 6: 지원 사이트 ────────────────────────────────────────────────
+        tabs.addTab(_tab("""
+<h2>🌐 지원 사이트</h2>
+<p style='color:#aaa;font-size:13px;'>yt-dlp 기반으로 1,000개 이상의 사이트를 지원합니다. 주요 사이트 목록:</p>
+
+<h3>🇰🇷 국내</h3>
+<ul>
+  <li><b>네이버 TV</b> (tv.naver.com) — 미리보기 불가, 다운로드만 가능</li>
+  <li><b>카카오TV</b> (tv.kakao.com)</li>
+  <li><b>아프리카TV</b> (afreecatv.com) — VOD</li>
+  <li><b>CHZZK</b> (chzzk.naver.com) — 네이버 치지직 VOD</li>
+  <li><b>네이버 카페/블로그</b> — 일부 영상</li>
+  <li><b>Bugs</b> (bugs.co.kr) — 음악</li>
+</ul>
+
+<h3>🌏 글로벌 영상</h3>
+<ul>
+  <li><b>YouTube</b> (youtube.com, youtu.be) — 숏츠 포함</li>
+  <li><b>Instagram</b> (instagram.com) — 릴스, 게시물</li>
+  <li><b>TikTok</b> (tiktok.com)</li>
+  <li><b>Facebook</b> (facebook.com, fb.watch)</li>
+  <li><b>X / Twitter</b> (x.com, twitter.com)</li>
+  <li><b>Vimeo</b> (vimeo.com)</li>
+  <li><b>Dailymotion</b> (dailymotion.com)</li>
+  <li><b>Reddit</b> (reddit.com) — 영상 게시물</li>
+  <li><b>Bilibili</b> (bilibili.com)</li>
+  <li><b>Niconico</b> (nicovideo.jp)</li>
+  <li><b>Twitch</b> (twitch.tv) — VOD / 클립</li>
+  <li><b>Kick</b> (kick.com) — VOD / 클립</li>
+</ul>
+
+<h3>🎵 오디오 / 음악</h3>
+<ul>
+  <li><b>SoundCloud</b> (soundcloud.com)</li>
+  <li><b>Bandcamp</b> (bandcamp.com)</li>
+  <li><b>Mixcloud</b> (mixcloud.com)</li>
+</ul>
+
+<h3>📺 방송 / 뉴스</h3>
+<ul>
+  <li><b>BBC iPlayer</b>, <b>ABC</b>, <b>CBS</b>, <b>CNN</b> 등 일부 방송사</li>
+  <li><b>Streamable</b>, <b>Gfycat</b>, <b>Imgur</b> (영상)</li>
+</ul>
+
+<div class='tip'>💡 로그인이 필요한 콘텐츠(멤버십, 비공개 등)는 <b>도구 → 쿠키 파일 설정</b>으로 해결할 수 있습니다.<br>
+전체 지원 사이트 목록: <a href='https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md'>github.com/yt-dlp/yt-dlp</a></div>
+"""), "🌐 지원 사이트")
 
         lay.addWidget(tabs)
         btn = QPushButton("닫기")
@@ -3299,7 +3596,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         if self._mode == 'local':
             url = self._local_file or ''
         else:
-            url = self.url_input.currentText().strip()
+            url = (self.url_input.currentData() or self.url_input.currentText()).strip()
         if not url:
             self._log("큐 추가 오류: URL 또는 로컬 파일을 먼저 선택하세요.")
             return
@@ -3326,6 +3623,14 @@ v.addEventListener('click',function(){{togglePlay();}});
         }
         display_name = os.path.basename(url) if self._mode == 'local' else url
         seg = f"{secs_to_hms(start_s)} ~ {secs_to_hms(end_s)}"
+        clip_secs = end_s - start_s
+        dur = secs_to_duration(clip_secs)
+        local_f = url if self._mode == 'local' else ''
+        size_bytes = self._calc_size_bytes(
+            clip_secs, 'gif' if is_gif else item_data['ext'],
+            item_data.get('res', '최고화질'), item_data.get('gif_width', '480'),
+            item_data.get('mute', False), local_f, self._duration)
+        size_str = f"~{self._size_str(size_bytes)}"
         if is_gif:
             self._gif_queue.append(item_data)
             idx = len(self._gif_queue)
@@ -3333,11 +3638,13 @@ v.addEventListener('click',function(){{togglePlay();}});
             row.setText(0, str(idx))
             row.setText(1, display_name)
             row.setText(2, seg)
+            row.setText(3, dur)
+            row.setText(4, size_str)
             fps = item_data['gif_fps']; w = item_data['gif_width']
-            row.setText(3, f"{fps}fps/{w}")
-            row.setText(4, "대기")
+            row.setText(5, f"{fps}fps/{w}")
+            row.setText(6, "대기")
             self.gif_queue_tree.addTopLevelItem(row)
-            self._log(f"GIF 큐 추가: #{idx}  [{seg}]  {fps}fps/{w}")
+            self._log(f"GIF 큐 추가: #{idx}  [{seg}]  {dur}  {size_str}  {fps}fps/{w}")
         else:
             self._queue.append(item_data)
             idx = len(self._queue)
@@ -3345,10 +3652,12 @@ v.addEventListener('click',function(){{togglePlay();}});
             row.setText(0, str(idx))
             row.setText(1, display_name)
             row.setText(2, seg)
-            row.setText(3, ext)
-            row.setText(4, "대기")
+            row.setText(3, dur)
+            row.setText(4, size_str)
+            row.setText(5, ext)
+            row.setText(6, "대기")
             self.queue_tree.addTopLevelItem(row)
-            self._log(f"큐 추가: #{idx}  [{seg}]  {ext}")
+            self._log(f"큐 추가: #{idx}  [{seg}]  {dur}  {size_str}  {ext}")
 
     def _run_queue(self):
         if self._queue_running:
@@ -3379,7 +3688,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         item_data = self._queue[self._queue_idx]
         tree_item = self.queue_tree.topLevelItem(self._queue_idx)
         if tree_item:
-            tree_item.setText(4, "실행 중")
+            tree_item.setText(6, "실행 중")
         self._log(f"── 큐 #{self._queue_idx + 1} 시작 ──")
         self._start_download_queue_item(item_data)
 
@@ -3470,7 +3779,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         tree_item = self.queue_tree.topLevelItem(self._queue_idx)
         if success:
             if tree_item:
-                tree_item.setText(4, "✔완료")
+                tree_item.setText(6, "✔완료")
             if path:
                 self._queue_results.append(path)
                 dur = getattr(self, '_current_item_duration', 0)
@@ -3478,7 +3787,7 @@ v.addEventListener('click',function(){{togglePlay();}});
                     self._queue_result_durations[path] = dur
         else:
             if tree_item:
-                tree_item.setText(4, "✘실패")
+                tree_item.setText(6, "✘실패")
         self._queue_idx += 1
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -3621,7 +3930,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         item_data = self._gif_queue[self._gif_queue_idx]
         tree_item = self.gif_queue_tree.topLevelItem(self._gif_queue_idx)
         if tree_item:
-            tree_item.setText(4, "실행 중")
+            tree_item.setText(6, "실행 중")
         self._log(f"── GIF 큐 #{self._gif_queue_idx + 1} 시작 ──")
         self._start_gif_queue_item(item_data)
 
@@ -3730,12 +4039,12 @@ v.addEventListener('click',function(){{togglePlay();}});
         tree_item = self.gif_queue_tree.topLevelItem(self._gif_queue_idx)
         if success:
             if tree_item:
-                tree_item.setText(4, "✔완료")
+                tree_item.setText(6, "✔완료")
             if path:
                 self._gif_queue_results.append(path)
         else:
             if tree_item:
-                tree_item.setText(4, "✘실패")
+                tree_item.setText(6, "✘실패")
         self._gif_queue_idx += 1
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -3900,7 +4209,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
-            self.src_combo.setCurrentIndex(0)   # URL 모드
+            self._set_source(0)   # URL 모드
             self.url_input.setCurrentText(data['url'])
             self.load_video()
 
@@ -3913,7 +4222,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
-            self.src_combo.setCurrentIndex(0)   # URL 모드
+            self._set_source(0)   # URL 모드
             self.url_input.setCurrentText(data['url'])
             self.load_video()
 

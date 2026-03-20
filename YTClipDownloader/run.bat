@@ -1,57 +1,83 @@
 @echo off
+chcp 65001
 cd /d "%~dp0"
 
-REM ── Python 설치 / 버전 확인 ──────────────────────────────────────────────
-python --version >nul 2>&1
-if errorlevel 1 goto :install_python
+set PYTHON=
+call :find_python
+if defined PYTHON goto :check_version
+goto :install_python
 
-REM Python 버전이 3.8 미만이면 재설치
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
+:find_python
+where python > "%TEMP%\_pycheck.txt" 2>&1
+if not errorlevel 1 (
+    set /p PYTHON=<"%TEMP%\_pycheck.txt"
+    if exist "%TEMP%\_pycheck.txt" del "%TEMP%\_pycheck.txt"
+    goto :eof
+)
+if exist "%TEMP%\_pycheck.txt" del "%TEMP%\_pycheck.txt"
+for %%v in (313 312 311 310 39 38) do (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe" (
+        set PYTHON=%LOCALAPPDATA%\Programs\Python\Python%%v\python.exe
+        goto :eof
+    )
+    if exist "C:\Python%%v\python.exe" (
+        set PYTHON=C:\Python%%v\python.exe
+        goto :eof
+    )
+)
+goto :eof
+
+:check_version
+for /f "tokens=2 delims= " %%v in ('%PYTHON% --version 2^>^&1') do set PYVER=%%v
 for /f "tokens=1,2 delims=." %%a in ("%PYVER%") do (set PYMAJ=%%a & set PYMIN=%%b)
 if %PYMAJ% LSS 3 goto :install_python
 if %PYMAJ% EQU 3 if %PYMIN% LSS 8 (
-    echo 현재 Python %PYVER% 은 너무 오래된 버전입니다. Python 3.12 를 설치합니다...
-    echo.
+    echo Python %PYVER% is too old. Installing 3.12...
     goto :install_python
 )
 goto :check_packages
 
 :install_python
-echo Python 을 설치합니다...
+echo Installing Python 3.12...
 echo.
-winget install --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
+winget install --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
 if errorlevel 1 (
-    echo [오류] 자동 설치에 실패했습니다.
-    echo 직접 https://www.python.org 에서 Python 3.8 이상을 설치 후 다시 실행하세요.
+    echo [ERROR] Auto-install failed.
+    echo Please install Python 3.8+ from https://www.python.org and run again.
     pause
     exit /b 1
 )
-call refreshenv >nul 2>&1
-set "PATH=%LOCALAPPDATA%\Programs\Python\Python312;%LOCALAPPDATA%\Programs\Python\Python312\Scripts;%PATH%"
-echo Python 설치 완료.
+echo Python installed. Searching path...
 echo.
+set PYTHON=
+call :find_python
+if not defined PYTHON (
+    echo [ERROR] Python executable not found.
+    echo Please restart your computer and try again.
+    pause
+    exit /b 1
+)
 
 :check_packages
-REM ── 패키지 설치 확인 ─────────────────────────────────────────────────────
-python -c "import PyQt5" >nul 2>&1
-if errorlevel 1 (
-    echo 필요한 패키지를 설치합니다...
-    python -m pip install --upgrade pip --user --quiet 2>nul
-    python -m pip install "PyQt5>=5.15" "PyQtWebEngine>=5.15" --user --quiet
+"%PYTHON%" -c "import PyQt5" > "%TEMP%\_pyqt5check.txt" 2>&1
+set PYQ5ERR=%errorlevel%
+if exist "%TEMP%\_pyqt5check.txt" del "%TEMP%\_pyqt5check.txt"
+if %PYQ5ERR% NEQ 0 (
+    echo Installing required packages...
+    "%PYTHON%" -m pip install --upgrade pip --quiet
+    "%PYTHON%" -m pip install "PyQt5>=5.15" "PyQtWebEngine>=5.15" --quiet
     if errorlevel 1 (
-        echo [오류] 패키지 설치에 실패했습니다.
-        echo Python 버전이 너무 오래된 경우 3.8 이상으로 업그레이드 후 다시 실행하세요.
+        echo [ERROR] Package installation failed.
         pause
         exit /b 1
     )
-    echo 패키지 설치 완료.
+    echo Packages installed.
     echo.
 )
 
-REM ── 실행 ─────────────────────────────────────────────────────────────────
-python main.py
+"%PYTHON%" main.py
 if errorlevel 1 (
     echo.
-    echo [오류] 실행에 실패했습니다.
+    echo [ERROR] Failed to run.
     pause
 )
