@@ -879,7 +879,11 @@ class MainWindow(QMainWindow):
         self.url_input.lineEdit().textChanged.connect(self._update_overlay)
         btn_load = QPushButton("로드"); btn_load.setFixedWidth(64)
         btn_load.clicked.connect(self.load_video)
-        url_lay.addWidget(lbl); url_lay.addWidget(self.url_input); url_lay.addWidget(btn_load)
+        btn_clear_url = QPushButton("🗑"); btn_clear_url.setFixedWidth(28)
+        btn_clear_url.setToolTip("URL 히스토리 전체 삭제")
+        btn_clear_url.clicked.connect(self._clear_url_history)
+        url_lay.addWidget(lbl); url_lay.addWidget(self.url_input)
+        url_lay.addWidget(btn_load); url_lay.addWidget(btn_clear_url)
         top_lay.addWidget(self.url_widget)
 
         # ── Local file row ────────────────────────────────────────────────────
@@ -887,13 +891,20 @@ class MainWindow(QMainWindow):
         local_lay = QHBoxLayout(self.local_widget)
         local_lay.setContentsMargins(0, 0, 0, 0)
         local_lay.addWidget(QLabel("파일:"))
-        self.local_path_lbl = QLineEdit()
-        self.local_path_lbl.setPlaceholderText("파일이 선택되지 않았습니다.")
-        self.local_path_lbl.setReadOnly(True)
+        self.local_path_lbl = QComboBox()
+        self.local_path_lbl.setEditable(True)
+        self.local_path_lbl.setInsertPolicy(QComboBox.NoInsert)
+        self.local_path_lbl.lineEdit().setPlaceholderText("파일이 선택되지 않았습니다.")
+        self.local_path_lbl.lineEdit().setReadOnly(True)
+        self.local_path_lbl.activated.connect(self._on_local_history_selected)
+        self.local_path_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         local_lay.addWidget(self.local_path_lbl)
+        btn_clear_local = QPushButton("🗑"); btn_clear_local.setFixedWidth(28)
+        btn_clear_local.setToolTip("로컬 파일 히스토리 전체 삭제")
+        btn_clear_local.clicked.connect(self._clear_local_history)
         btn_file = QPushButton("파일 선택"); btn_file.setFixedWidth(80)
         btn_file.clicked.connect(self._browse_local_file)
-        local_lay.addWidget(btn_file)
+        local_lay.addWidget(btn_clear_local); local_lay.addWidget(btn_file)
         self.local_widget.setVisible(False)
         top_lay.addWidget(self.local_widget)
 
@@ -1490,7 +1501,7 @@ class MainWindow(QMainWindow):
         if path:
             self._local_file = path
             self._proxy_loaded = False   # 새 파일 → 프록시 상태 초기화
-            self.local_path_lbl.setText(path)
+            self._add_recent_local(path)
             self._load_local_preview(path)
             self.name_input.setText(os.path.splitext(os.path.basename(path))[0])
             self._apply_local_gif_mode(path)
@@ -1688,7 +1699,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
                 if err_out:
                     self._log(f"[ffmpeg] {err_out[-500:]}")  # 마지막 500자만
             self._log("✘ 미리보기 변환 실패 — 슬라이더 범위만 설정합니다.")
-            self._web_container.show_overlay("⚠  미리보기 불가")
+            self._web_container.show_overlay("⚠  미리보기 불가\n구간 추출은 가능합니다")
             self._probe_local_duration()
             return
         if proxy and os.path.isfile(proxy):
@@ -1700,7 +1711,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
                 QTimer.singleShot(500, self._seek_start_and_play)
         else:
             self._log("✘ 미리보기 변환 실패 — 슬라이더 범위만 설정합니다.")
-            self._web_container.show_overlay("⚠  미리보기 불가")
+            self._web_container.show_overlay("⚠  미리보기 불가\n구간 추출은 가능합니다")
             self._probe_local_duration()
 
     def _probe_local_duration(self):
@@ -1764,7 +1775,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
                 self._log("유효한 YouTube URL이 아닙니다.")
                 return
             player_url = f"http://127.0.0.1:{_SERVER_PORT}/"
-            if self.web.url().toString().startswith(player_url):
+            if self.web.url().toString().rstrip('/') == player_url.rstrip('/'):
                 # 플레이어 페이지가 이미 로드된 상태 → 바로 재생
                 self.web.page().runJavaScript(f"loadVideo('{vid}');")
                 self._yt_loaded = True
@@ -1870,6 +1881,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
         if not stream_url:
             self._log("직접 재생 가능한 스트림 없음 — 다운로드는 가능합니다.")
             self._web_container.show_overlay("⚠ 미리보기 불가 — 다운로드는 가능합니다")
+            self._yt_loaded = True   # 슬라이더/저장 버튼 활성화
             return
 
         if is_hls:
@@ -1896,7 +1908,7 @@ window._videoError=null;
 v.onerror=function(){{
   var msg=v.error?('코드 '+v.error.code+': '+(v.error.message||'재생 불가')):'알 수 없는 오류';
   window._videoError=msg;errDiv.style.display='block';
-  errDiv.textContent='⚠ 미리보기 불가  ('+msg+')';
+  errDiv.textContent='⚠ 미리보기 불가  ('+msg+')\n다운로드/구간 추출은 가능합니다';
 }};
 function getCurrentTime(){{return v.currentTime||0;}}
 function getDuration(){{return isNaN(v.duration)?0:v.duration;}}
@@ -1932,7 +1944,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             proto = f.get('protocol', '')
             if proto in ('m3u8', 'm3u8_native', 'dash'):
                 continue
-            if f.get('vcodec', 'none') == 'none':
+            # vcodec이 명시적으로 'none'이고 video_ext도 없으면 오디오 전용으로 간주
+            if f.get('vcodec') == 'none' and f.get('video_ext', 'none') == 'none':
                 continue
             ext = f.get('ext', '')
             if ext in ('mp4', 'webm', 'mov', 'ts') or ext == '':
@@ -2218,6 +2231,37 @@ v.addEventListener('click',function(){{togglePlay();}});
             self.path_input.removeItem(self.path_input.count() - 1)
         self.path_input.setCurrentIndex(0)
 
+    def _add_recent_local(self, path: str):
+        """로컬 파일 경로를 히스토리 맨 앞에 추가 (최대 8개, 중복 제거)."""
+        for i in range(self.local_path_lbl.count() - 1, -1, -1):
+            if self.local_path_lbl.itemText(i) == path:
+                self.local_path_lbl.removeItem(i)
+        self.local_path_lbl.insertItem(0, path)
+        while self.local_path_lbl.count() > 8:
+            self.local_path_lbl.removeItem(self.local_path_lbl.count() - 1)
+        self.local_path_lbl.setCurrentIndex(0)
+
+    def _clear_url_history(self):
+        self.url_input.clear()
+        self.url_input.lineEdit().clear()
+
+    def _clear_local_history(self):
+        self.local_path_lbl.clear()
+        self._local_file = ''
+
+    def _on_local_history_selected(self, idx: int):
+        """히스토리에서 파일 선택 시 해당 파일 로드."""
+        path = self.local_path_lbl.itemText(idx)
+        if not path:
+            return
+        if not os.path.isfile(path):
+            self._log(f"파일을 찾을 수 없습니다: {path}")
+            return
+        self._local_file = path
+        self._proxy_loaded = False
+        self._load_local_preview(path)
+        self.name_input.setText(os.path.splitext(os.path.basename(path))[0])
+
     def _add_recent_url(self, url: str):
         """URL을 최근 목록 맨 앞에 추가 (최대 8개, 중복 제거). userData=URL, text=제목(추후 업데이트)."""
         for i in range(self.url_input.count() - 1, -1, -1):
@@ -2234,10 +2278,12 @@ v.addEventListener('click',function(){{togglePlay();}});
             return
         for i in range(self.url_input.count()):
             if self.url_input.itemData(i) == url:
+                le = self.url_input.lineEdit()
+                le.blockSignals(True)
                 self.url_input.setItemText(i, f"{title}  [{url[:40]}{'…' if len(url)>40 else ''}]")
-                # 현재 선택 항목이면 lineEdit도 URL로 유지 (제목이 입력창에 들어가지 않게)
                 if self.url_input.currentIndex() == i:
-                    self.url_input.lineEdit().setText(url)
+                    le.setText(url)
+                le.blockSignals(False)
                 break
 
     def _open_folder(self):
@@ -3261,7 +3307,7 @@ v.addEventListener('click',function(){{togglePlay();}});
             return  # 다운로드 중에는 무시
         self._local_file = path
         self._proxy_loaded = False   # 새 파일 → 프록시 상태 초기화
-        self.local_path_lbl.setText(path)
+        self._add_recent_local(path)
         self._set_source(1)   # 로컬 파일 모드로 전환
         self._load_local_preview(path)
         self.name_input.setText(os.path.splitext(os.path.basename(path))[0])
@@ -3314,6 +3360,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             for i in range(self.url_input.count())
         ]
         s.setValue("recent_urls", recent_urls)
+        recent_locals = [self.local_path_lbl.itemText(i) for i in range(self.local_path_lbl.count())]
+        s.setValue("recent_locals", recent_locals)
 
     def _restore_settings(self):
         s = QSettings("aram", "ClipDownloader")
@@ -3355,6 +3403,15 @@ v.addEventListener('click',function(){{togglePlay();}});
                 self.url_input.addItem(display, url)
             self.url_input.setCurrentIndex(-1)
             self.url_input.lineEdit().clear()
+        recent_locals = s.value("recent_locals", [])
+        if isinstance(recent_locals, str):
+            recent_locals = [recent_locals]
+        if recent_locals:
+            for p in recent_locals:
+                if p:
+                    self.local_path_lbl.addItem(p)
+            self.local_path_lbl.setCurrentIndex(-1)
+            self.local_path_lbl.lineEdit().clear()
 
     # -----------------------------------------------------------------------
     # Update tools
