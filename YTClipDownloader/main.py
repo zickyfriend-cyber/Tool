@@ -723,6 +723,11 @@ class DroppableWebView(QWebEngineView):
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
+    _sig_update_available = pyqtSignal(str, str)   # (remote_sha, download_url)
+    _sig_update_latest    = pyqtSignal(str)         # (remote_sha)
+    _sig_update_error     = pyqtSignal(str)
+    _sig_update_restart   = pyqtSignal(str)         # (script_path)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Clip Downloader v{APP_VERSION}  (YouTube / Instagram / TikTok / 외)")
@@ -781,6 +786,13 @@ class MainWindow(QMainWindow):
         self._setup_timers()
         self._fetch_versions()
         self._restore_settings()
+        # 업데이트 signal 연결 (백그라운드 스레드 → 메인 스레드)
+        self._sig_update_available.connect(self._on_update_available)
+        self._sig_update_latest.connect(self._on_update_latest)
+        self._sig_update_error.connect(lambda msg: (
+            self._log(f"✘ 업데이트 오류: {msg}"),
+            QMessageBox.warning(self, "업데이트 오류", msg)))
+        self._sig_update_restart.connect(self._on_update_restart)
         # 시작 시 백그라운드 업데이트 확인 (3초 후, UI 로드 완료 후)
         QTimer.singleShot(3000, self._check_update_background)
         _ver = QLabel(f"  v{APP_VERSION}  ")
@@ -3371,12 +3383,14 @@ v.addEventListener('click',function(){{togglePlay();}});
     @staticmethod
     def _compute_local_sha() -> str:
         """실행 중인 main.py의 GitHub blob SHA 계산 (SHA1 of 'blob {size}\\0{content}').
-        _installed_sha.txt 없이도 로컬 파일 버전을 정확히 판단할 수 있다."""
+        core.autocrlf=true 환경에서 로컬 CRLF → LF 정규화 후 계산해야 GitHub SHA와 일치한다."""
         try:
             import hashlib
             path = os.path.abspath(__file__)
             with open(path, 'rb') as f:
                 data = f.read()
+            # Windows CRLF → LF 정규화 (GitHub은 LF로 저장)
+            data = data.replace(b'\r\n', b'\n')
             header = f"blob {len(data)}\0".encode()
             return hashlib.sha1(header + data).hexdigest()
         except Exception:
@@ -3401,28 +3415,48 @@ v.addEventListener('click',function(){{togglePlay();}});
         except Exception as e:
             return '', '', str(e)
 
+    def _on_update_available(self, remote_sha: str, download_url: str):
+        """메인 스레드에서 실행 — 업데이트 여부 확인 팝업."""
+        ret = QMessageBox.question(
+            self, "업데이트 가능",
+            "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret == QMessageBox.Yes:
+            self._do_update(remote_sha, download_url)
+
+    def _on_update_latest(self, remote_sha: str):
+        """최신 버전 확인 — remote SHA를 기준으로 저장해 다음 실행 시 재비교."""
+        self._save_local_sha(remote_sha)
+        self._log("✔ 최신 버전입니다.")
+        QMessageBox.information(self, "업데이트", "최신 버전입니다.")
+
+    def _on_update_restart(self, script_path: str):
+        """업데이트 완료 후 재시작."""
+        QMessageBox.information(self, "업데이트 완료",
+            "업데이트가 완료되었습니다.\n프로그램을 재시작합니다.")
+        import subprocess as _sp
+        _sp.Popen([sys.executable, script_path] + sys.argv[1:])
+        QApplication.quit()
+
+    def _get_local_sha(self) -> str:
+        """저장된 SHA 없으면 로컬 파일에서 직접 계산 후 저장."""
+        local_sha = self._load_local_sha()
+        if not local_sha:
+            local_sha = self._compute_local_sha()
+            if local_sha:
+                self._save_local_sha(local_sha)
+        return local_sha
+
     def _check_update_background(self):
         """시작 시 백그라운드에서 변경 감지 (UI 블로킹 없음)."""
         def _run():
-            remote_sha, _, err = self._fetch_remote_sha()
+            remote_sha, download_url, err = self._fetch_remote_sha()
             if not remote_sha:
                 return
-            local_sha = self._load_local_sha()
-            if not local_sha:
-                # 최초 실행: 현재 파일의 실제 SHA로 초기화
-                local_sha = self._compute_local_sha()
-                if local_sha:
-                    self._save_local_sha(local_sha)
+            local_sha = self._get_local_sha()
             if local_sha and remote_sha != local_sha:
                 self._log("🔔 업데이트가 있습니다.")
-                def _ask():
-                    ret = QMessageBox.question(
-                        self, "업데이트 가능",
-                        "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
-                        QMessageBox.Yes | QMessageBox.No)
-                    if ret == QMessageBox.Yes:
-                        self._do_update(remote_sha, download_url)
-                QTimer.singleShot(0, _ask)
+                self._sig_update_available.emit(remote_sha, download_url)
         threading.Thread(target=_run, daemon=True).start()
 
     def _check_update_manual(self):
@@ -3431,29 +3465,15 @@ v.addEventListener('click',function(){{togglePlay();}});
         def _run():
             remote_sha, download_url, err = self._fetch_remote_sha()
             if not remote_sha:
-                self._log(f"✘ 업데이트 확인 실패: {err}")
-                QTimer.singleShot(0, lambda: QMessageBox.warning(self, "업데이트 확인 실패",
-                    f"GitHub에 연결할 수 없습니다.\n\n{err}"))
+                self._sig_update_error.emit(err)
                 return
-            local_sha = self._load_local_sha()
-            if not local_sha:
-                local_sha = self._compute_local_sha()
-                if local_sha:
-                    self._save_local_sha(local_sha)
+            local_sha = self._get_local_sha()
             self._log(f"  로컬 SHA : {local_sha[:12]}…")
             self._log(f"  원격 SHA : {remote_sha[:12]}…")
             if not local_sha or remote_sha != local_sha:
-                def _ask():
-                    ret = QMessageBox.question(
-                        self, "업데이트 가능",
-                        "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
-                        QMessageBox.Yes | QMessageBox.No)
-                    if ret == QMessageBox.Yes:
-                        self._do_update(remote_sha, download_url)
-                QTimer.singleShot(0, _ask)
+                self._sig_update_available.emit(remote_sha, download_url)
             else:
-                self._log("✔ 최신 버전입니다.")
-                QTimer.singleShot(0, lambda: QMessageBox.information(self, "업데이트", "최신 버전입니다."))
+                self._sig_update_latest.emit(remote_sha)
         threading.Thread(target=_run, daemon=True).start()
 
     def _do_update(self, new_sha: str, download_url: str):
@@ -3469,7 +3489,7 @@ v.addEventListener('click',function(){{togglePlay();}});
                     data = r.read()
             except Exception as e:
                 self._log(f"✘ 다운로드 실패: {e}")
-                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패", f"다운로드 오류:\n{e}"))
+                self._sig_update_error.emit(f"다운로드 오류:\n{e}")
                 return
             # 문법 검사
             try:
@@ -3477,7 +3497,7 @@ v.addEventListener('click',function(){{togglePlay();}});
                 ast.parse(data.decode('utf-8'))
             except SyntaxError as e:
                 self._log(f"✘ 다운로드된 파일 오류: {e}")
-                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패", f"파일이 손상되었습니다:\n{e}"))
+                self._sig_update_error.emit(f"파일이 손상되었습니다:\n{e}")
                 return
             # 기존 파일 백업 후 교체
             script_path = os.path.abspath(__file__)
@@ -3488,17 +3508,11 @@ v.addEventListener('click',function(){{togglePlay();}});
                     f.write(data)
                 self._save_local_sha(new_sha)
                 self._log("✔ 업데이트 완료. 재시작합니다...")
-                def _restart():
-                    QMessageBox.information(self, "업데이트 완료",
-                        "업데이트가 완료되었습니다.\n프로그램을 재시작합니다.")
-                    import subprocess as _sp
-                    _sp.Popen([sys.executable, script_path] + sys.argv[1:])
-                    QApplication.quit()
-                QTimer.singleShot(0, _restart)
+                self._sig_update_restart.emit(script_path)
             except Exception as e:
                 self._log(f"✘ 파일 교체 실패: {e}")
-                QTimer.singleShot(0, lambda: QMessageBox.critical(self, "업데이트 실패",
-                    f"파일 교체 중 오류:\n{e}\n\n수동으로 main.py를 교체해주세요."))
+                self._sig_update_error.emit(f"파일 교체 중 오류:\n{e}\n\n수동으로 main.py를 교체해주세요.")
+        threading.Thread(target=_run, daemon=True).start()
 
     def _update_ytdlp(self):
         self._log("── yt-dlp 업데이트 확인 중... ──")

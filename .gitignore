@@ -1,0 +1,8 @@
+# 자동 생성 파일
+YTClipDownloader/_installed_sha.txt
+YTClipDownloader/_preview_proxy_*.webm
+YTClipDownloader/_preview_proxy_*.mp4
+YTClipDownloader/main.py.bak
+
+# QtWebEngine 런타임 캐시
+YTClipDownloader/.webengine/
