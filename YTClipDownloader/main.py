@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "2.1"
+APP_VERSION      = "2.2"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -1930,31 +1930,38 @@ v.addEventListener('click', function() {{ togglePlay(); }});
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
 *{{margin:0;padding:0;box-sizing:border-box;}}
-html,body{{width:100%;height:100%;background:#000;overflow:hidden;}}
-video{{width:100%;height:100%;}}
+html,body{{width:100%;height:100%;background:#000;overflow:hidden;cursor:pointer;}}
+video{{width:100%;height:100%;display:block;}}
 #err{{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
       color:#ff6b6b;background:rgba(0,0,0,.8);padding:14px 18px;border-radius:6px;
       font-size:13px;text-align:center;max-width:80%;}}
+#ico{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+      font-size:48px;color:rgba(255,255,255,.8);pointer-events:none;
+      opacity:0;transition:opacity 0.3s;}}
 </style></head><body>
-<video id="v" src="{stream_url}" controls autoplay preload="metadata" crossorigin="anonymous"></video>
+<video id="v" src="{stream_url}" autoplay preload="auto"></video>
 <div id="err"></div>
+<div id="ico">▶</div>
 <script>
 var v=document.getElementById('v');
 var errDiv=document.getElementById('err');
+var ico=document.getElementById('ico');
 window._videoError=null;
 v.onerror=function(){{
   var msg=v.error?('코드 '+v.error.code+': '+(v.error.message||'재생 불가')):'알 수 없는 오류';
   window._videoError=msg;errDiv.style.display='block';
   errDiv.textContent='⚠ 미리보기 불가  ('+msg+')\n다운로드/구간 추출은 가능합니다';
 }};
+v.addEventListener('canplay',function(){{v.play().catch(function(){{}});}},{{once:true}});
+function _showIco(ch){{ico.textContent=ch;ico.style.opacity='1';setTimeout(function(){{ico.style.opacity='0';}},600);}}
 function getCurrentTime(){{return v.currentTime||0;}}
 function getDuration(){{return isNaN(v.duration)?0:v.duration;}}
 function seekTo(s){{var p=!v.paused;v.currentTime=s;if(p)v.play().catch(function(){{}});}}
 function setRate(r){{v.playbackRate=r;}}
 function getPlaybackRate(){{return v.playbackRate||1;}}
 function getVideoError(){{return window._videoError;}}
-function togglePlay(){{if(v.paused)v.play().catch(function(){{}});else v.pause();}}
-v.addEventListener('click',function(){{togglePlay();}});
+function togglePlay(){{if(v.paused){{v.play().catch(function(){{}});_showIco('▶');}}else{{v.pause();_showIco('⏸');}}}}
+document.body.addEventListener('click',function(){{togglePlay();}});
 </script>
 </body></html>"""
         self.web.setHtml(html)

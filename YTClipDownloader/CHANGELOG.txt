@@ -2,6 +2,14 @@
   YTClipDownloader  변경 이력
 ========================================
 
+v2.2  (2026-03-21)
+  - 비YouTube HTML5 미리보기: controls/crossorigin 제거, body 클릭으로 재생/일시정지
+  - canplay 이벤트로 자동재생 보강 (autoplay 속성 + 이벤트 이중 처리)
+  - 클릭 시 ▶/⏸ 아이콘 피드백 추가
+  - preload="auto"로 변경하여 버퍼링 즉시 시작
+
+----------------------------------------
+
 v2.1  (2026-03-21)
   - YouTube Shorts URL(/shorts/) 지원 추가 (extract_yt_id 패턴 확장)
   - 비YouTube 미리보기 HTML5 video에 autoplay 추가 (로드 시 자동 재생)
