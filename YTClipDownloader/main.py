@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.2"
+APP_VERSION      = "1.3"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -3414,7 +3414,7 @@ v.addEventListener('click',function(){{togglePlay();}});
     # Update tools
     # -----------------------------------------------------------------------
     # -----------------------------------------------------------------------
-    # 자동 업데이트 (GitHub blob SHA 비교 — 버전 번호 수동 관리 불필요)
+    # 자동 업데이트 (GitHub Release zipball — APP_VERSION 태그 비교)
     # -----------------------------------------------------------------------
     @staticmethod
     def _version_newer(remote_tag: str, local_ver: str) -> bool:
@@ -3428,8 +3428,8 @@ v.addEventListener('click',function(){{togglePlay();}});
 
     @staticmethod
     def _fetch_latest_release() -> tuple:
-        """GitHub releases/latest API로 최신 태그와 main.py asset URL 반환.
-        반환: (tag, asset_url, errmsg). 성공 시 errmsg=''."""
+        """GitHub releases/latest API로 최신 태그와 zipball URL 반환.
+        반환: (tag, zipball_url, errmsg). 성공 시 errmsg=''."""
         try:
             import urllib.request, json
             req = urllib.request.Request(
@@ -3438,17 +3438,10 @@ v.addEventListener('click',function(){{togglePlay();}});
             with urllib.request.urlopen(req, timeout=10) as r:
                 info = json.loads(r.read().decode('utf-8'))
             tag = info.get('tag_name', '')
-            if not tag:
-                return '', '', '릴리즈 태그를 찾을 수 없습니다.'
-            # assets에서 main.py 찾기
-            asset_url = ''
-            for asset in info.get('assets', []):
-                if asset.get('name') == 'main.py':
-                    asset_url = asset.get('browser_download_url', '')
-                    break
-            if not asset_url:
-                return '', '', f'릴리즈 {tag}에 main.py asset이 없습니다.'
-            return tag, asset_url, ''
+            zipball_url = info.get('zipball_url', '')
+            if not tag or not zipball_url:
+                return '', '', '릴리즈 정보를 찾을 수 없습니다.'
+            return tag, zipball_url, ''
         except Exception as e:
             return '', '', str(e)
 
@@ -3500,41 +3493,51 @@ v.addEventListener('click',function(){{togglePlay();}});
                 self._sig_update_latest.emit(tag)
         threading.Thread(target=_run, daemon=True).start()
 
-    def _do_update(self, asset_url: str):
-        """main.py를 Release asset에서 다운로드하여 교체 후 재시작."""
+    def _do_update(self, zipball_url: str):
+        """GitHub Release zipball을 다운로드해 YTClipDownloader/ 파일 전체 교체 후 재시작.
+        ytdlp/ 폴더(대용량 바이너리)는 제외."""
         self._log("⬇ 업데이트 다운로드 중...")
         def _run():
+            # 1. zipball 다운로드
             try:
-                import urllib.request
+                import urllib.request, zipfile, io
                 req = urllib.request.Request(
-                    asset_url,
+                    zipball_url,
                     headers={'User-Agent': 'ClipDownloader-Updater'})
-                with urllib.request.urlopen(req, timeout=30) as r:
+                with urllib.request.urlopen(req, timeout=60) as r:
                     data = r.read()
+                self._log(f"  다운로드 완료 ({len(data)//1024} KB)")
             except Exception as e:
                 self._log(f"✘ 다운로드 실패: {e}")
                 self._sig_update_error.emit(f"다운로드 오류:\n{e}")
                 return
-            # 문법 검사
+            # 2. zip에서 YTClipDownloader/ 파일 교체 (ytdlp/ 제외)
             try:
-                import ast
-                ast.parse(data.decode('utf-8'))
-            except SyntaxError as e:
-                self._log(f"✘ 다운로드된 파일 오류: {e}")
-                self._sig_update_error.emit(f"파일이 손상되었습니다:\n{e}")
-                return
-            # 기존 파일 백업 후 교체
-            script_path = os.path.abspath(__file__)
-            try:
-                import shutil
-                shutil.copy2(script_path, script_path + '.bak')
-                with open(script_path, 'wb') as f:
-                    f.write(data)
-                self._log("✔ 업데이트 완료. 재시작합니다...")
-                self._sig_update_restart.emit(script_path)
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    names = zf.namelist()
+                    # zip 최상위 폴더명 찾기 (예: "zickyfriend-cyber-Tool-abc123/")
+                    top = names[0].split('/')[0] + '/' if names else ''
+                    prefix = top + 'YTClipDownloader/'
+                    updated = 0
+                    for name in names:
+                        if not name.startswith(prefix):
+                            continue
+                        rel = name[len(prefix):]   # YTClipDownloader/ 이후 상대경로
+                        if not rel or rel.endswith('/'):
+                            continue               # 디렉터리 항목 스킵
+                        if rel.startswith('ytdlp/'):
+                            continue               # 대용량 바이너리 제외
+                        dest = os.path.join(BASE_DIR, rel.replace('/', os.sep))
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with zf.open(name) as src:
+                            with open(dest, 'wb') as dst:
+                                dst.write(src.read())
+                        updated += 1
+                self._log(f"✔ {updated}개 파일 교체 완료. 재시작합니다...")
+                self._sig_update_restart.emit(os.path.abspath(__file__))
             except Exception as e:
                 self._log(f"✘ 파일 교체 실패: {e}")
-                self._sig_update_error.emit(f"파일 교체 중 오류:\n{e}\n\n수동으로 main.py를 교체해주세요.")
+                self._sig_update_error.emit(f"파일 교체 중 오류:\n{e}")
         threading.Thread(target=_run, daemon=True).start()
 
     def _update_ytdlp(self):
