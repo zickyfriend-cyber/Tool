@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.9"
+APP_VERSION      = "2.0"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -779,6 +779,7 @@ class MainWindow(QMainWindow):
         self._gif_queue_results: list = []
         self._pending_segment   = None   # (start_s, end_s) — 큐 더블클릭 후 슬라이더 복원용
         self._pending_gif_seek  = False  # GIF 프록시 로드 완료 후 start 구간으로 seek
+        self._loaded_preview_url = ''   # 현재 미리보기 중인 URL (비YouTube 포함)
 
         self._build_ui()
         self._setup_timers()
@@ -1448,6 +1449,16 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(200, self._seek_start_and_play)
 
+    def _is_same_loaded_url(self, url: str) -> bool:
+        """현재 미리보기에 로드된 영상과 동일한 URL인지 확인."""
+        if is_youtube(url):
+            cur_text   = self.url_input.lineEdit().text().strip()
+            cur_stored = (self.url_input.currentData() or '').strip()
+            cur_url    = cur_text if cur_text.startswith('http') else cur_stored
+            return bool(extract_yt_id(cur_url) and
+                        extract_yt_id(cur_url) == extract_yt_id(url))
+        return bool(self._loaded_preview_url and self._loaded_preview_url == url)
+
     def _apply_pending_segment(self):
         """_pending_segment를 슬라이더에 즉시 적용하고 해당 위치부터 재생."""
         if not self._pending_segment:
@@ -1798,6 +1809,7 @@ v.addEventListener('click', function() {{ togglePlay(); }});
             if not vid:
                 self._log("유효한 YouTube URL이 아닙니다.")
                 return
+            self._loaded_preview_url = url
             player_url = f"http://127.0.0.1:{_SERVER_PORT}/"
             if self.web.url().toString().rstrip('/') == player_url.rstrip('/'):
                 # 플레이어 페이지가 이미 로드된 상태 → 바로 재생
@@ -1945,6 +1957,7 @@ v.addEventListener('click',function(){{togglePlay();}});
 </script>
 </body></html>"""
         self.web.setHtml(html)
+        self._loaded_preview_url = orig_url
         self._yt_loaded = True
         self._web_container.hide_overlay()
         if not dur:
@@ -2034,7 +2047,14 @@ v.addEventListener('click',function(){{togglePlay();}});
                         f"else seekTo({start});}})();"
                     )
                 else:
-                    self.web.page().runJavaScript(f"seekTo({start});")
+                    # seek 후 명시적 play — 일시정지 상태에서도 재생 보장
+                    self.web.page().runJavaScript(
+                        f"seekTo({start});"
+                        f"(function(){{"
+                        f"if(typeof player!=='undefined'&&player&&player.playVideo){{player.playVideo();}}"
+                        f"else{{var v=document.getElementById('v');if(v)v.play().catch(function(){{}});}}"
+                        f"}})();"
+                    )
 
     # -----------------------------------------------------------------------
     # Slider ↔ text sync
@@ -4534,13 +4554,9 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
-            # 이미 같은 YouTube 영상이 로드된 상태라면 재로드 없이 구간만 적용
-            if (self._yt_loaded and self._duration > 0
-                    and self._mode == 'url' and is_youtube(data['url'])):
-                cur_text   = self.url_input.lineEdit().text().strip()
-                cur_stored = (self.url_input.currentData() or '').strip()
-                cur_url    = cur_text if cur_text.startswith('http') else cur_stored
-                if extract_yt_id(cur_url) == extract_yt_id(data['url']):
+            # 이미 같은 영상이 로드된 상태라면 재로드 없이 구간만 즉시 적용
+            if self._yt_loaded and self._duration > 0 and self._mode == 'url':
+                if self._is_same_loaded_url(data['url']):
                     self._apply_pending_segment()
                     return
             self._set_source(0)   # URL 모드
@@ -4556,12 +4572,8 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
-            if (self._yt_loaded and self._duration > 0
-                    and self._mode == 'url' and is_youtube(data['url'])):
-                cur_text   = self.url_input.lineEdit().text().strip()
-                cur_stored = (self.url_input.currentData() or '').strip()
-                cur_url    = cur_text if cur_text.startswith('http') else cur_stored
-                if extract_yt_id(cur_url) == extract_yt_id(data['url']):
+            if self._yt_loaded and self._duration > 0 and self._mode == 'url':
+                if self._is_same_loaded_url(data['url']):
                     self._apply_pending_segment()
                     return
             self._set_source(0)   # URL 모드

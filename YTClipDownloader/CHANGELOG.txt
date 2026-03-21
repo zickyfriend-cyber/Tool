@@ -2,6 +2,13 @@
   YTClipDownloader  변경 이력
 ========================================
 
+v2.0  (2026-03-21)
+  - 큐 더블클릭 seek: 비YouTube(Instagram 등) URL에도 fast path 적용 (같은 영상 재로드 없이 즉시 seek)
+  - 현재 로드된 URL 추적(_loaded_preview_url)으로 YouTube/비YouTube 통합 same-URL 판별
+  - 구간 반복 루프 핸들러에 명시적 playVideo()/v.play() 추가 (일시정지 상태에서도 루프 동작)
+
+----------------------------------------
+
 v1.9  (2026-03-21)
   - URL 다운로드 시 --force-keyframes-at-cuts 추가 (VP9 DASH 구간 경계 타임스탬프 오류 수정)
   - 큐 실행(일반/속도 변환) 경로에도 동일 적용
