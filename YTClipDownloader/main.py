@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.4"
+APP_VERSION      = "1.5"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -875,6 +875,7 @@ class MainWindow(QMainWindow):
             "YouTube, Facebook 등 URL 입력  (예: https://www.youtube.com/watch?v=...)")
         self.url_input.lineEdit().returnPressed.connect(self.load_video)
         self.url_input.lineEdit().textChanged.connect(self._update_overlay)
+        self.url_input.activated.connect(self._on_url_history_selected)
         btn_load = QPushButton("로드"); btn_load.setFixedWidth(64)
         btn_load.clicked.connect(self.load_video)
         btn_clear_url = QPushButton("🗑"); btn_clear_url.setFixedWidth(28)
@@ -1763,7 +1764,11 @@ v.addEventListener('click', function() {{ togglePlay(); }});
     # Video loading (URL mode)
     # -----------------------------------------------------------------------
     def load_video(self):
-        url = (self.url_input.currentData() or self.url_input.currentText()).strip()
+        # lineEdit 텍스트 직접 사용 — currentData()는 히스토리 선택 후 새 URL 입력 시 구 URL 반환
+        le_text = self.url_input.lineEdit().text().strip()
+        stored  = (self.url_input.currentData() or '').strip()
+        # lineEdit이 http로 시작하면 직접 입력한 URL, 아니면(제목 표시 등) currentData 사용
+        url = le_text if le_text.startswith('http') else (stored or le_text)
         if not url:
             return
         self._add_recent_url(url)
@@ -2247,6 +2252,16 @@ v.addEventListener('click',function(){{togglePlay();}});
     def _clear_local_history(self):
         self.local_path_lbl.clear()
         self._local_file = ''
+
+    def _on_url_history_selected(self, idx: int):
+        """히스토리에서 URL 선택 시 lineEdit에 실제 URL 표시 (제목 텍스트 대신)."""
+        url = self.url_input.itemData(idx) or self.url_input.itemText(idx)
+        if not url:
+            return
+        le = self.url_input.lineEdit()
+        le.blockSignals(True)
+        le.setText(url)
+        le.blockSignals(False)
 
     def _on_local_history_selected(self, idx: int):
         """히스토리에서 파일 선택 시 해당 파일 로드."""
@@ -4507,11 +4522,22 @@ v.addEventListener('click',function(){{togglePlay();}});
         if self._mode != 'url':
             return
         text = QApplication.clipboard().text().strip()
-        if not text or not is_youtube(text):
+        if not text or not text.startswith('http'):
             return
-        # url_input과 다른 YouTube URL이 클립보드에 있으면 항상 자동 입력
-        if text != self.url_input.currentText().strip():
-            self.url_input.setCurrentText(text)
+        # 지원 사이트 URL만 감지 (YouTube, Instagram, Facebook, TikTok, Bilibili, Naver TV)
+        if not re.search(
+                r'(youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.com'
+                r'|tiktok\.com|bilibili\.com|tv\.naver\.com)', text, re.I):
+            return
+        # 현재 lineEdit의 실제 URL과 비교 (표시 텍스트가 아닌 실제 URL)
+        current = self.url_input.lineEdit().text().strip()
+        if not current.startswith('http'):
+            current = (self.url_input.currentData() or '').strip()
+        if text != current:
+            le = self.url_input.lineEdit()
+            le.blockSignals(True)
+            le.setText(text)
+            le.blockSignals(False)
             self._log("📋 클립보드 URL 자동 입력")
 
     # -----------------------------------------------------------------------
