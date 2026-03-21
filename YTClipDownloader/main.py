@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "2.3"
+APP_VERSION      = "2.4"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -1964,7 +1964,7 @@ v.onerror=function(){{
 function _showIco(ch){{ico.textContent=ch;ico.style.opacity='1';setTimeout(function(){{ico.style.opacity='0';}},600);}}
 function getCurrentTime(){{return v.currentTime||0;}}
 function getDuration(){{return isNaN(v.duration)?0:v.duration;}}
-function seekTo(s){{var p=!v.paused;v.currentTime=s;if(p)v.play().catch(function(){{}});}}
+function seekTo(s){{var p=!v.paused;v.currentTime=s;_showIco(Math.round(s)+'s');if(p)v.play().catch(function(){{}});}}
 function setRate(r){{v.playbackRate=r;}}
 function getPlaybackRate(){{return v.playbackRate||1;}}
 function getVideoError(){{return window._videoError;}}
@@ -1972,7 +1972,7 @@ function togglePlay(){{if(v.paused){{v.play().catch(function(){{}});_showIco('�
 document.body.addEventListener('click',function(){{togglePlay();}});
 </script>
 </body></html>"""
-        self.web.setHtml(html)
+        self.web.setHtml(html, QUrl(f"http://127.0.0.1:{_SERVER_PORT}/preview"))
         self._loaded_preview_url = orig_url
         self._yt_loaded = True
         self._web_container.hide_overlay()
