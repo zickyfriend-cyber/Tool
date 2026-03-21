@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "2.2"
+APP_VERSION      = "2.3"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -1450,6 +1450,15 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(200, self._seek_start_and_play)
 
+    def _autoplay_html5(self):
+        """비YouTube HTML5 미리보기 로드 후 자동 재생 (canplay 리스너 대체)."""
+        if (self._yt_loaded and self._mode == 'url'
+                and self._loaded_preview_url
+                and not is_youtube(self._loaded_preview_url)):
+            self.web.page().runJavaScript(
+                "var v=document.getElementById('v');if(v&&v.paused)v.play().catch(function(){});"
+            )
+
     def _is_same_loaded_url(self, url: str) -> bool:
         """현재 미리보기에 로드된 영상과 동일한 URL인지 확인."""
         if is_youtube(url):
@@ -1939,7 +1948,7 @@ video{{width:100%;height:100%;display:block;}}
       font-size:48px;color:rgba(255,255,255,.8);pointer-events:none;
       opacity:0;transition:opacity 0.3s;}}
 </style></head><body>
-<video id="v" src="{stream_url}" autoplay preload="auto"></video>
+<video id="v" src="{stream_url}" preload="auto"></video>
 <div id="err"></div>
 <div id="ico">▶</div>
 <script>
@@ -1952,7 +1961,6 @@ v.onerror=function(){{
   window._videoError=msg;errDiv.style.display='block';
   errDiv.textContent='⚠ 미리보기 불가  ('+msg+')\n다운로드/구간 추출은 가능합니다';
 }};
-v.addEventListener('canplay',function(){{v.play().catch(function(){{}});}},{{once:true}});
 function _showIco(ch){{ico.textContent=ch;ico.style.opacity='1';setTimeout(function(){{ico.style.opacity='0';}},600);}}
 function getCurrentTime(){{return v.currentTime||0;}}
 function getDuration(){{return isNaN(v.duration)?0:v.duration;}}
@@ -1968,6 +1976,7 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self._loaded_preview_url = orig_url
         self._yt_loaded = True
         self._web_container.hide_overlay()
+        QTimer.singleShot(600, self._autoplay_html5)
         if not dur:
             self._dur_timer.start()
         self._log(f"미리보기 준비 완료: {title or orig_url}")

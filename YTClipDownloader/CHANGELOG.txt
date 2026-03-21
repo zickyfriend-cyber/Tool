@@ -2,6 +2,12 @@
   YTClipDownloader  변경 이력
 ========================================
 
+v2.3  (2026-03-21)
+  - 비YouTube 미리보기: canplay 리스너 제거 (seek 시 재발동으로 일시정지 무력화 버그 수정)
+  - autoplay 속성 제거 후 Python 타이머(600ms)로 자동재생 처리
+
+----------------------------------------
+
 v2.2  (2026-03-21)
   - 비YouTube HTML5 미리보기: controls/crossorigin 제거, body 클릭으로 재생/일시정지
   - canplay 이벤트로 자동재생 보강 (autoplay 속성 + 이벤트 이중 처리)
