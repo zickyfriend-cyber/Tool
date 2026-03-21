@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.6"
+APP_VERSION      = "1.7"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -2818,11 +2818,16 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._add_recent_path(save_dir)
             # _find_new_file을 한 번만 호출해 경로를 일관되게 유지
             found_path = self._last_saved_path or self._find_new_file(save_dir)
+            merge_mode = self._queue_running and self._queue_merge_chk.isChecked()
             if found_path and os.path.isfile(found_path):
-                self._new_file_paths.add(found_path)
-                self._log_link("✔ 완료!  저장 위치: ", found_path)
-                if self.autoopen_chk.isChecked():
-                    os.startfile(found_path)
+                if merge_mode:
+                    # 합치기 모드: 개별 클립은 임시 파일 → 링크 없이 간략 로그
+                    self._log(f"  ✔ 큐 #{self._queue_idx + 1} 다운로드 완료")
+                else:
+                    self._new_file_paths.add(found_path)
+                    self._log_link("✔ 완료!  저장 위치: ", found_path)
+                    if self.autoopen_chk.isChecked():
+                        os.startfile(found_path)
             else:
                 self._log(f"✔ 완료!  저장 위치: {save_dir}")
                 found_path = None
@@ -4122,8 +4127,7 @@ v.addEventListener('click',function(){{togglePlay();}});
         concat_proc.setWorkingDirectory(YTDLP_DIR)
         concat_proc.setProcessChannelMode(QProcess.MergedChannels)
         concat_proc.readyRead.connect(
-            lambda p=concat_proc: self._log(
-                p.readAll().data().decode('utf-8', errors='replace').strip()))
+            lambda p=concat_proc: self._log_concat_output(p))
         concat_proc.finished.connect(self._on_concat_done)
         _cargs = ['-y', '-f', 'concat', '-safe', '0',
                   '-avoid_negative_ts', 'make_zero',
@@ -4159,6 +4163,17 @@ v.addEventListener('click',function(){{togglePlay();}});
         else:
             self._log(f"✘ 합치기 실패 (코드: {code})")
         self._end_queue()
+
+    def _log_concat_output(self, proc):
+        """concat 프로세스 출력을 로그에 표시. VP9 DASH DTS 경고는 필터링."""
+        text = proc.readAll().data().decode('utf-8', errors='replace')
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            if 'Non-monotonic DTS' in line or ('DTS' in line and 'out of order' in line):
+                continue
+            self._log(line)
 
     def _end_queue(self):
         self._queue_running = False
