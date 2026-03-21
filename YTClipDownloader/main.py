@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.3"
+APP_VERSION      = "1.4"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -724,6 +724,7 @@ class MainWindow(QMainWindow):
     _sig_update_latest    = pyqtSignal(str)         # (latest_tag)
     _sig_update_error     = pyqtSignal(str)
     _sig_update_restart   = pyqtSignal(str)         # (script_path)
+    _sig_update_progress  = pyqtSignal(str)         # 진행 메시지
 
     def __init__(self):
         super().__init__()
@@ -1362,6 +1363,7 @@ class MainWindow(QMainWindow):
         # ── 메뉴바: 도구 ─────────────────────────────────────────────────────
         tool_menu = self.menuBar().addMenu("도구(&T)")
         tool_menu.addAction("기능 가이드", self._show_feature_guide)
+        tool_menu.addAction("변경 이력", self._show_changelog)
         tool_menu.addSeparator()
         tool_menu.addAction("쿠키 파일 설정...", self._set_cookie_file)
         tool_menu.addSeparator()
@@ -3495,50 +3497,92 @@ v.addEventListener('click',function(){{togglePlay();}});
 
     def _do_update(self, zipball_url: str):
         """GitHub Release zipball을 다운로드해 YTClipDownloader/ 파일 전체 교체 후 재시작.
-        ytdlp/ 폴더(대용량 바이너리)는 제외."""
-        self._log("⬇ 업데이트 다운로드 중...")
+        ytdlp/ 폴더(대용량 바이너리)는 제외. 진행 중 모달 다이얼로그로 메인 윈도우 비활성화."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QTextEdit, QProgressBar
+
+        # ── 진행 상황 모달 다이얼로그 ──────────────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle("업데이트 설치 중...")
+        dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowCloseButtonHint)
+        dlg.setModal(True)
+        dlg.resize(440, 280)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("업데이트를 설치하는 중입니다. 잠시 기다려주세요."))
+        te = QTextEdit(); te.setReadOnly(True); te.setFont(QFont("Consolas", 9))
+        lay.addWidget(te)
+        bar = QProgressBar(); bar.setRange(0, 0)   # 인디케이터 (진행률 미확정)
+        lay.addWidget(bar)
+
+        def _on_prog(msg):
+            te.append(msg)
+        def _on_done(*_):
+            bar.setRange(0, 1); bar.setValue(1)
+            dlg.accept()
+        def _on_err(*_):
+            bar.setRange(0, 1)
+            dlg.reject()
+
+        self._sig_update_progress.connect(_on_prog)
+        self._sig_update_restart.connect(_on_done)
+        self._sig_update_error.connect(_on_err)
+
+        # ── 백그라운드 스레드 ──────────────────────────────────────────
+        def _emit(msg):
+            self._sig_update_progress.emit(msg)
+            self._log(msg)
+
         def _run():
             # 1. zipball 다운로드
             try:
                 import urllib.request, zipfile, io
+                _emit("⬇ zipball 다운로드 중...")
                 req = urllib.request.Request(
                     zipball_url,
                     headers={'User-Agent': 'ClipDownloader-Updater'})
                 with urllib.request.urlopen(req, timeout=60) as r:
                     data = r.read()
-                self._log(f"  다운로드 완료 ({len(data)//1024} KB)")
+                _emit(f"  다운로드 완료 ({len(data)//1024} KB)")
             except Exception as e:
-                self._log(f"✘ 다운로드 실패: {e}")
+                _emit(f"✘ 다운로드 실패: {e}")
                 self._sig_update_error.emit(f"다운로드 오류:\n{e}")
                 return
             # 2. zip에서 YTClipDownloader/ 파일 교체 (ytdlp/ 제외)
             try:
+                _emit("📦 파일 교체 중...")
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     names = zf.namelist()
-                    # zip 최상위 폴더명 찾기 (예: "zickyfriend-cyber-Tool-abc123/")
                     top = names[0].split('/')[0] + '/' if names else ''
                     prefix = top + 'YTClipDownloader/'
-                    updated = 0
-                    for name in names:
-                        if not name.startswith(prefix):
-                            continue
-                        rel = name[len(prefix):]   # YTClipDownloader/ 이후 상대경로
-                        if not rel or rel.endswith('/'):
-                            continue               # 디렉터리 항목 스킵
-                        if rel.startswith('ytdlp/'):
-                            continue               # 대용량 바이너리 제외
+                    targets = [n for n in names
+                               if n.startswith(prefix)
+                               and not n[len(prefix):].endswith('/')
+                               and n[len(prefix):]
+                               and not n[len(prefix):].startswith('ytdlp/')]
+                    total = len(targets)
+                    for i, name in enumerate(targets, 1):
+                        rel = name[len(prefix):]
                         dest = os.path.join(BASE_DIR, rel.replace('/', os.sep))
                         os.makedirs(os.path.dirname(dest), exist_ok=True)
                         with zf.open(name) as src:
                             with open(dest, 'wb') as dst:
                                 dst.write(src.read())
-                        updated += 1
-                self._log(f"✔ {updated}개 파일 교체 완료. 재시작합니다...")
+                        self._sig_update_progress.emit(f"  [{i}/{total}] {rel}")
+                _emit(f"✔ {total}개 파일 교체 완료. 재시작합니다...")
                 self._sig_update_restart.emit(os.path.abspath(__file__))
             except Exception as e:
-                self._log(f"✘ 파일 교체 실패: {e}")
+                _emit(f"✘ 파일 교체 실패: {e}")
                 self._sig_update_error.emit(f"파일 교체 중 오류:\n{e}")
+
         threading.Thread(target=_run, daemon=True).start()
+        dlg.exec_()
+
+        # 임시 연결 해제
+        try: self._sig_update_progress.disconnect(_on_prog)
+        except Exception: pass
+        try: self._sig_update_restart.disconnect(_on_done)
+        except Exception: pass
+        try: self._sig_update_error.disconnect(_on_err)
+        except Exception: pass
 
     def _update_ytdlp(self):
         self._log("── yt-dlp 업데이트 확인 중... ──")
@@ -3550,6 +3594,29 @@ v.addEventListener('click',function(){{togglePlay();}});
             "✔ yt-dlp 업데이트 완료." if code == 0
             else f"✘ 업데이트 실패 (코드: {code})"))
         proc.start(YTDLP_EXE, ['-U'])
+
+    def _show_changelog(self):
+        path = os.path.join(BASE_DIR, 'CHANGELOG.txt')
+        try:
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+        except Exception as e:
+            QMessageBox.warning(self, "변경 이력", f"CHANGELOG.txt를 읽을 수 없습니다.\n{e}")
+            return
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        dlg = QDialog(self)
+        dlg.setWindowTitle("변경 이력")
+        dlg.resize(500, 400)
+        lay = QVBoxLayout(dlg)
+        te = QTextEdit()
+        te.setReadOnly(True)
+        te.setFont(QFont("Consolas", 10))
+        te.setPlainText(text)
+        lay.addWidget(te)
+        btn = QPushButton("닫기")
+        btn.clicked.connect(dlg.accept)
+        lay.addWidget(btn)
+        dlg.exec_()
 
     def _show_feature_guide(self):
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton, QTabWidget
