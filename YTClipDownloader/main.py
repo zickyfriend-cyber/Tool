@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "2.0"
+APP_VERSION      = "2.1"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -149,6 +149,7 @@ def extract_yt_id(url: str):
     for pat in [r'[?&]v=([a-zA-Z0-9_-]{11})',
                 r'youtu\.be/([a-zA-Z0-9_-]{11})',
                 r'embed/([a-zA-Z0-9_-]{11})',
+                r'shorts/([a-zA-Z0-9_-]{11})',
                 r'^([a-zA-Z0-9_-]{11})$']:
         m = re.search(pat, url.strip())
         if m:
@@ -1935,7 +1936,7 @@ video{{width:100%;height:100%;}}
       color:#ff6b6b;background:rgba(0,0,0,.8);padding:14px 18px;border-radius:6px;
       font-size:13px;text-align:center;max-width:80%;}}
 </style></head><body>
-<video id="v" src="{stream_url}" controls preload="metadata" crossorigin="anonymous"></video>
+<video id="v" src="{stream_url}" controls autoplay preload="metadata" crossorigin="anonymous"></video>
 <div id="err"></div>
 <script>
 var v=document.getElementById('v');
