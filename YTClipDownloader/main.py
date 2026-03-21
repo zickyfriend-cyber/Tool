@@ -100,11 +100,8 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION  = "1.2"
-_GH_RAW      = "https://raw.githubusercontent.com/zickyfriend-cyber/Tool/main/YTClipDownloader"
-_SCRIPT_URL  = f"{_GH_RAW}/main.py"
-_GH_API_FILE = "https://api.github.com/repos/zickyfriend-cyber/Tool/contents/YTClipDownloader/main.py"
-_SHA_CACHE   = None   # 런타임 캐시 (프로세스 재시작 전까지 유지)
+APP_VERSION      = "1.2"
+_GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -723,8 +720,8 @@ class DroppableWebView(QWebEngineView):
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    _sig_update_available = pyqtSignal(str, str)   # (remote_sha, download_url)
-    _sig_update_latest    = pyqtSignal(str)         # (remote_sha)
+    _sig_update_available = pyqtSignal(str, str)   # (latest_tag, asset_url)
+    _sig_update_latest    = pyqtSignal(str)         # (latest_tag)
     _sig_update_error     = pyqtSignal(str)
     _sig_update_restart   = pyqtSignal(str)         # (script_path)
 
@@ -3419,73 +3416,54 @@ v.addEventListener('click',function(){{togglePlay();}});
     # -----------------------------------------------------------------------
     # 자동 업데이트 (GitHub blob SHA 비교 — 버전 번호 수동 관리 불필요)
     # -----------------------------------------------------------------------
-    def _load_local_sha(self) -> str:
-        """마지막으로 설치된 main.py의 GitHub blob SHA (로컬 캐시 파일)."""
-        sha_file = os.path.join(BASE_DIR, '_installed_sha.txt')
-        if os.path.isfile(sha_file):
-            try:
-                return open(sha_file, 'r').read().strip()
-            except Exception:
-                pass
-        return ''
-
-    def _save_local_sha(self, sha: str):
-        sha_file = os.path.join(BASE_DIR, '_installed_sha.txt')
+    @staticmethod
+    def _version_newer(remote_tag: str, local_ver: str) -> bool:
+        """'v1.3' 형식 태그와 '1.2' 형식 로컬 버전 비교. remote가 더 높으면 True."""
+        def _parse(v: str):
+            return tuple(int(x) for x in v.lstrip('v').split('.') if x.isdigit())
         try:
-            with open(sha_file, 'w') as f:
-                f.write(sha)
+            return _parse(remote_tag) > _parse(local_ver)
         except Exception:
-            pass
+            return False
 
     @staticmethod
-    def _compute_local_sha() -> str:
-        """실행 중인 main.py의 GitHub blob SHA 계산 (SHA1 of 'blob {size}\\0{content}').
-        core.autocrlf=true 환경에서 로컬 CRLF → LF 정규화 후 계산해야 GitHub SHA와 일치한다."""
-        try:
-            import hashlib
-            path = os.path.abspath(__file__)
-            with open(path, 'rb') as f:
-                data = f.read()
-            # Windows CRLF → LF 정규화 (GitHub은 LF로 저장)
-            data = data.replace(b'\r\n', b'\n')
-            header = f"blob {len(data)}\0".encode()
-            return hashlib.sha1(header + data).hexdigest()
-        except Exception:
-            return ''
-
-    @staticmethod
-    def _fetch_remote_sha() -> tuple:
-        """GitHub API로 main.py의 최신 blob SHA와 다운로드 URL 반환.
-        반환: (sha, download_url, errmsg). 성공 시 errmsg=''."""
+    def _fetch_latest_release() -> tuple:
+        """GitHub releases/latest API로 최신 태그와 main.py asset URL 반환.
+        반환: (tag, asset_url, errmsg). 성공 시 errmsg=''."""
         try:
             import urllib.request, json
             req = urllib.request.Request(
-                _GH_API_FILE,
+                _GH_RELEASES_API,
                 headers={'User-Agent': 'ClipDownloader-Updater'})
             with urllib.request.urlopen(req, timeout=10) as r:
                 info = json.loads(r.read().decode('utf-8'))
-            sha = info.get('sha', '')
-            url = info.get('download_url', _SCRIPT_URL)
-            if not sha:
-                return '', '', 'SHA를 찾을 수 없습니다 (GitHub API 응답 이상)'
-            return sha, url, ''
+            tag = info.get('tag_name', '')
+            if not tag:
+                return '', '', '릴리즈 태그를 찾을 수 없습니다.'
+            # assets에서 main.py 찾기
+            asset_url = ''
+            for asset in info.get('assets', []):
+                if asset.get('name') == 'main.py':
+                    asset_url = asset.get('browser_download_url', '')
+                    break
+            if not asset_url:
+                return '', '', f'릴리즈 {tag}에 main.py asset이 없습니다.'
+            return tag, asset_url, ''
         except Exception as e:
             return '', '', str(e)
 
-    def _on_update_available(self, remote_sha: str, download_url: str):
-        """메인 스레드에서 실행 — 업데이트 여부 확인 팝업."""
+    def _on_update_available(self, latest_tag: str, asset_url: str):
+        """메인 스레드에서 실행 — 업데이트 팝업."""
         ret = QMessageBox.question(
             self, "업데이트 가능",
-            "새로운 업데이트가 있습니다.\n지금 업데이트하시겠습니까?",
+            f"새 버전 {latest_tag} 이 있습니다. (현재: v{APP_VERSION})\n지금 업데이트하시겠습니까?",
             QMessageBox.Yes | QMessageBox.No)
         if ret == QMessageBox.Yes:
-            self._do_update(remote_sha, download_url)
+            self._do_update(asset_url)
 
-    def _on_update_latest(self, remote_sha: str):
-        """최신 버전 확인 — remote SHA를 기준으로 저장해 다음 실행 시 재비교."""
-        self._save_local_sha(remote_sha)
-        self._log("✔ 최신 버전입니다.")
-        QMessageBox.information(self, "업데이트", "최신 버전입니다.")
+    def _on_update_latest(self, latest_tag: str):
+        self._log(f"✔ 최신 버전입니다. (v{APP_VERSION})")
+        QMessageBox.information(self, "업데이트", f"최신 버전입니다. (v{APP_VERSION})")
 
     def _on_update_restart(self, script_path: str):
         """업데이트 완료 후 재시작."""
@@ -3495,52 +3473,41 @@ v.addEventListener('click',function(){{togglePlay();}});
         _sp.Popen([sys.executable, script_path] + sys.argv[1:])
         QApplication.quit()
 
-    def _get_local_sha(self) -> str:
-        """저장된 SHA 없으면 로컬 파일에서 직접 계산 후 저장."""
-        local_sha = self._load_local_sha()
-        if not local_sha:
-            local_sha = self._compute_local_sha()
-            if local_sha:
-                self._save_local_sha(local_sha)
-        return local_sha
-
     def _check_update_background(self):
-        """시작 시 백그라운드에서 변경 감지 (UI 블로킹 없음)."""
+        """시작 시 백그라운드에서 최신 릴리즈 확인 (UI 블로킹 없음)."""
         def _run():
-            remote_sha, download_url, err = self._fetch_remote_sha()
-            if not remote_sha:
+            tag, asset_url, err = self._fetch_latest_release()
+            if not tag:
                 return
-            local_sha = self._get_local_sha()
-            if local_sha and remote_sha != local_sha:
-                self._log("🔔 업데이트가 있습니다.")
-                self._sig_update_available.emit(remote_sha, download_url)
+            if self._version_newer(tag, APP_VERSION):
+                self._log(f"🔔 새 버전 {tag} 이 있습니다.")
+                self._sig_update_available.emit(tag, asset_url)
         threading.Thread(target=_run, daemon=True).start()
 
     def _check_update_manual(self):
         """도구 메뉴에서 수동으로 업데이트 확인."""
         self._log("── 업데이트 확인 중 (GitHub 연결 중...) ──")
         def _run():
-            remote_sha, download_url, err = self._fetch_remote_sha()
-            if not remote_sha:
+            tag, asset_url, err = self._fetch_latest_release()
+            if not tag:
                 self._sig_update_error.emit(err)
                 return
-            local_sha = self._get_local_sha()
-            self._log(f"  로컬 SHA : {local_sha[:12]}…")
-            self._log(f"  원격 SHA : {remote_sha[:12]}…")
-            if not local_sha or remote_sha != local_sha:
-                self._sig_update_available.emit(remote_sha, download_url)
+            self._log(f"  현재 버전 : v{APP_VERSION}")
+            self._log(f"  최신 버전 : {tag}")
+            if self._version_newer(tag, APP_VERSION):
+                self._sig_update_available.emit(tag, asset_url)
             else:
-                self._sig_update_latest.emit(remote_sha)
+                self._sig_update_latest.emit(tag)
         threading.Thread(target=_run, daemon=True).start()
 
-    def _do_update(self, new_sha: str, download_url: str):
-        """main.py를 GitHub에서 다운로드하여 교체 후 재시작."""
+    def _do_update(self, asset_url: str):
+        """main.py를 Release asset에서 다운로드하여 교체 후 재시작."""
         self._log("⬇ 업데이트 다운로드 중...")
         def _run():
             try:
                 import urllib.request
                 req = urllib.request.Request(
-                    download_url,
+                    asset_url,
                     headers={'User-Agent': 'ClipDownloader-Updater'})
                 with urllib.request.urlopen(req, timeout=30) as r:
                     data = r.read()
@@ -3563,7 +3530,6 @@ v.addEventListener('click',function(){{togglePlay();}});
                 shutil.copy2(script_path, script_path + '.bak')
                 with open(script_path, 'wb') as f:
                     f.write(data)
-                self._save_local_sha(new_sha)
                 self._log("✔ 업데이트 완료. 재시작합니다...")
                 self._sig_update_restart.emit(script_path)
             except Exception as e:
