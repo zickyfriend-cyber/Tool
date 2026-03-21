@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.8"
+APP_VERSION      = "1.9"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -2457,7 +2457,8 @@ v.addEventListener('click',function(){{togglePlay();}});
         os.makedirs(save_dir, exist_ok=True)
 
         args = (
-            ['--download-sections', f'*{start_str}-{end_str}']
+            ['--download-sections', f'*{start_str}-{end_str}',
+             '--force-keyframes-at-cuts']
             + fmt_args
             + self._cookie_args()
             + ['--ffmpeg-location', FFMPEG_DIR,
@@ -2493,7 +2494,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._speed_final_out = unique_path(os.path.join(save_dir, f"{stem}.{actual_ext}"))
             self._speed_temp      = None  # 다운로드 후 glob으로 탐색
             temp_args = (
-                ['--download-sections', f'*{start_str}-{end_str}']
+                ['--download-sections', f'*{start_str}-{end_str}',
+                 '--force-keyframes-at-cuts']
                 + fmt_args
                 + self._cookie_args()
                 + ['--ffmpeg-location', FFMPEG_DIR,
@@ -4062,7 +4064,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._speed_final_out  = unique_path(os.path.join(save_dir, f"{stem}.{actual_ext}"))
             self._speed_temp       = None
             temp_args = (
-                ['--download-sections', f'*{start_str}-{end_str}']
+                ['--download-sections', f'*{start_str}-{end_str}',
+                 '--force-keyframes-at-cuts']
                 + fmt_args
                 + ['--ffmpeg-location', FFMPEG_DIR,
                    '-P', save_dir,
@@ -4074,7 +4077,8 @@ v.addEventListener('click',function(){{togglePlay();}});
             self._run_process(YTDLP_EXE, temp_args, self._on_url_speed_dl_done)
         else:
             args = (
-                ['--download-sections', f'*{start_str}-{end_str}']
+                ['--download-sections', f'*{start_str}-{end_str}',
+                 '--force-keyframes-at-cuts']
                 + fmt_args
                 + ['--ffmpeg-location', FFMPEG_DIR,
                    '-P', save_dir,
