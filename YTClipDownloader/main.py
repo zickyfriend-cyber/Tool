@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.7"
+APP_VERSION      = "1.8"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -1447,6 +1447,26 @@ class MainWindow(QMainWindow):
                 self._pending_gif_seek = True   # 프록시 로드 완료 후 seek+play
             else:
                 QTimer.singleShot(200, self._seek_start_and_play)
+
+    def _apply_pending_segment(self):
+        """_pending_segment를 슬라이더에 즉시 적용하고 해당 위치부터 재생."""
+        if not self._pending_segment:
+            return
+        ps, pe = self._pending_segment
+        self._pending_segment = None
+        dur = self._duration
+        ps = max(0, min(ps, dur))
+        pe = max(ps + 1, min(pe, dur))
+        self._upd_start = True
+        self.rslider.setStart(ps, silent=True)
+        self.start_in.setText(secs_to_hms(ps))
+        self._upd_start = False
+        self._upd_end = True
+        self.rslider.setEnd(pe, silent=True)
+        self.end_in.setText(secs_to_hms(pe))
+        self._upd_end = False
+        self._refresh_dur()
+        QTimer.singleShot(50, self._seek_start_and_play)
 
     # -----------------------------------------------------------------------
     # Always on top
@@ -4095,10 +4115,9 @@ v.addEventListener('click',function(){{togglePlay();}});
     def _concat_queue_results(self):
         results = self._queue_results
         first_path = results[0]
-        first_ext  = os.path.splitext(first_path)[1]
         base_stem  = os.path.splitext(os.path.basename(first_path))[0]
         save_dir   = os.path.dirname(first_path)
-        merged_path = unique_path(os.path.join(save_dir, f"{base_stem}_merged{first_ext}"))
+        merged_path = unique_path(os.path.join(save_dir, f"{base_stem}_merged.mp4"))
 
         list_path = os.path.join(save_dir, f'_clipdl_concat_{os.getpid()}.txt')
         try:
@@ -4130,8 +4149,9 @@ v.addEventListener('click',function(){{togglePlay();}});
             lambda p=concat_proc: self._log_concat_output(p))
         concat_proc.finished.connect(self._on_concat_done)
         _cargs = ['-y', '-f', 'concat', '-safe', '0',
-                  '-avoid_negative_ts', 'make_zero',
-                  '-i', list_path, '-c', 'copy', merged_path]
+                  '-i', list_path,
+                  '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+                  '-c:a', 'aac', merged_path]
         concat_proc.start(FFMPEG_EXE, _cargs)
         self._concat_proc = concat_proc
 
@@ -4510,6 +4530,15 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
+            # 이미 같은 YouTube 영상이 로드된 상태라면 재로드 없이 구간만 적용
+            if (self._yt_loaded and self._duration > 0
+                    and self._mode == 'url' and is_youtube(data['url'])):
+                cur_text   = self.url_input.lineEdit().text().strip()
+                cur_stored = (self.url_input.currentData() or '').strip()
+                cur_url    = cur_text if cur_text.startswith('http') else cur_stored
+                if extract_yt_id(cur_url) == extract_yt_id(data['url']):
+                    self._apply_pending_segment()
+                    return
             self._set_source(0)   # URL 모드
             self.url_input.setCurrentText(data['url'])
             self.load_video()
@@ -4523,6 +4552,14 @@ v.addEventListener('click',function(){{togglePlay();}});
         if data['mode'] == 'local':
             self._on_file_dropped_to_player(data['url'])
         else:
+            if (self._yt_loaded and self._duration > 0
+                    and self._mode == 'url' and is_youtube(data['url'])):
+                cur_text   = self.url_input.lineEdit().text().strip()
+                cur_stored = (self.url_input.currentData() or '').strip()
+                cur_url    = cur_text if cur_text.startswith('http') else cur_stored
+                if extract_yt_id(cur_url) == extract_yt_id(data['url']):
+                    self._apply_pending_segment()
+                    return
             self._set_source(0)   # URL 모드
             self.url_input.setCurrentText(data['url'])
             self.load_video()
