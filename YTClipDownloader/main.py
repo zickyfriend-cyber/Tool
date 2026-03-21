@@ -4,7 +4,7 @@ import re
 import json
 import socket
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote as _url_quote
 
 from PyQt5.QtWidgets import (
@@ -32,11 +32,25 @@ _HTML_BYTES: bytes = b''
 _WIN_MUTEX   = None   # 다중 인스턴스 감지용 Windows 뮤텍스 핸들
 _LOCAL_VIDEO_PATH: str = ''   # HTTP 서버에서 서빙할 로컬 영상 경로
 _LOCAL_VIDEO_HTML: bytes = b''  # 해당 영상용 플레이어 HTML
+_PROXY_URL: str = ''         # 비YouTube 미리보기 프록시 대상 URL
+_HTML5_PLAYER_HTML: bytes = b''  # 비YouTube HTML5 플레이어 페이지 HTML
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # 쿼리스트링 제거 (캐시 버스팅용 ?t=N 무시)
         clean_path = self.path.split('?')[0]
+        # /html5_player  — 비YouTube HTML5 플레이어 페이지
+        if clean_path == '/html5_player':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(_HTML5_PLAYER_HTML)
+            return
+        # /stream  — 외부 비디오 URL 프록시 (Range 요청 지원, User-Agent 포워딩)
+        if clean_path == '/stream':
+            self._handle_stream_proxy()
+            return
         # /video  — 로컬 파일 HTTP 서빙 (Range 요청 지원)
         if clean_path in ('/video', '/video.mp4'):
             path = _LOCAL_VIDEO_PATH
@@ -91,16 +105,57 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
         self.wfile.write(_HTML_BYTES)
+    def _handle_stream_proxy(self):
+        """외부 비디오 URL을 로컬에서 프록시 — Range 요청 및 User-Agent 포워딩."""
+        import urllib.request, ssl
+        url = _PROXY_URL
+        if not url:
+            self.send_response(404); self.end_headers(); return
+        range_hdr = self.headers.get('Range', '')
+        headers = {
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/124.0.0.0 Safari/537.36'),
+            'Accept': '*/*',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+        }
+        if range_hdr:
+            headers['Range'] = range_hdr
+        req = urllib.request.Request(url, headers=headers)
+        ctx = ssl.create_default_context()
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+                self.send_response(resp.status)
+                for key in ('Content-Type', 'Content-Length', 'Content-Range',
+                            'Accept-Ranges', 'ETag', 'Last-Modified'):
+                    val = resp.headers.get(key)
+                    if val:
+                        self.send_header(key, val)
+                self.end_headers()
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    try:
+                        self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        break
+        except Exception:
+            try:
+                self.send_response(502); self.end_headers()
+            except Exception:
+                pass
+
     def log_message(self, *a): pass
 
 def _start_server():
-    srv = HTTPServer(('127.0.0.1', _SERVER_PORT), _Handler)
+    srv = ThreadingHTTPServer(('127.0.0.1', _SERVER_PORT), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "2.4"
+APP_VERSION      = "3.2"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -109,7 +164,8 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YTDLP_DIR   = os.path.normpath(os.path.join(BASE_DIR, 'ytdlp'))
 YTDLP_EXE   = os.path.join(YTDLP_DIR, 'yt-dlp.exe')
-DOWNLOAD_DIR = os.path.join(BASE_DIR, 'download')
+DOWNLOAD_DIR    = os.path.join(BASE_DIR, 'download')
+SCREENSHOT_DIR  = os.path.join(BASE_DIR, 'download', 'screenshot')
 FFMPEG_DIR  = YTDLP_DIR
 FFMPEG_EXE  = os.path.join(YTDLP_DIR, 'ffmpeg.exe')
 
@@ -311,15 +367,15 @@ class RangeSlider(QWidget):
     startReleased = pyqtSignal()
     endReleased   = pyqtSignal()
 
-    HW = 6    # handle half-width  (total: 12px)
-    HH = 12   # handle half-height (total: 24px)
-    TH = 7    # track height px
+    HW = 9    # handle half-width  (total: 18px)
+    HH = 15   # handle half-height (total: 30px)
+    TH = 11   # track height px
     R  = HW   # alias used in geometry (keep compat)
-    CY = 32   # fixed track center y (위 구간길이 + 아래 시간 레이블 공간 확보)
+    CY = 36   # fixed track center y (위 구간길이 + 아래 시간 레이블 공간 확보)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(64)
+        self.setMinimumHeight(74)
         self.setMouseTracking(True)
         self._min   = 0
         self._max   = 600
@@ -726,11 +782,13 @@ class MainWindow(QMainWindow):
     _sig_update_error     = pyqtSignal(str)
     _sig_update_restart   = pyqtSignal(str)         # (script_path)
     _sig_update_progress  = pyqtSignal(str)         # 진행 메시지
+    _sig_preview_ready    = pyqtSignal(str)         # 비YouTube 임시 파일 경로 ('' = 실패)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Clip Downloader v{APP_VERSION}  (YouTube / Instagram / TikTok / 외)")
-        self.resize(1200, 960)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1200, screen.width() - 80), min(960, screen.height() - 80))
         # 이전 세션에서 남은 프록시 임시 파일 정리
         for f in os.listdir(BASE_DIR):
             if f.startswith('_preview_proxy_') and (f.endswith('.webm') or f.endswith('.mp4')):
@@ -743,7 +801,11 @@ class MainWindow(QMainWindow):
         self._upd_start     = False
         self._upd_end       = False
         self._process       = None
-        self._pending_yt_id = None
+        self._pending_yt_id         = None
+        self._html5_preview_temp    = None   # 비YouTube 임시 미리보기 파일 경로
+        self._result_in_queue       = False  # 큐 실행 중 결과 패널 누적 모드
+        self._html5_dl_url          = ''     # 현재 다운로드 중인 URL (stale 방지)
+        self._sig_preview_ready.connect(self._on_preview_temp_ready)
         self._mode          = 'url'    # 'url' | 'local'
         self._local_file    = None
         self._local_is_gif  = False
@@ -782,6 +844,7 @@ class MainWindow(QMainWindow):
         self._pending_gif_seek  = False  # GIF 프록시 로드 완료 후 start 구간으로 seek
         self._loaded_preview_url = ''   # 현재 미리보기 중인 URL (비YouTube 포함)
 
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         self._build_ui()
         self._setup_timers()
         self._fetch_versions()
@@ -1076,7 +1139,7 @@ class MainWindow(QMainWindow):
         eff_lay.addWidget(self.crf_spin)
         eff_lay.addStretch()
         self.screenshot_btn = QPushButton("📷 스크린샷")
-        self.screenshot_btn.setFixedWidth(100)
+        self.screenshot_btn.setFixedWidth(125)
         self.screenshot_btn.setToolTip("현재 재생 위치를 PNG로 저장")
         self.screenshot_btn.clicked.connect(self._screenshot)
         eff_lay.addWidget(self.screenshot_btn)
@@ -1127,7 +1190,7 @@ class MainWindow(QMainWindow):
 
         self.queue_add_btn = QPushButton("큐에 추가")
         self.queue_add_btn.setFixedHeight(54)
-        self.queue_add_btn.setFixedWidth(150)
+        self.queue_add_btn.setFixedWidth(170)
         bf_q = QFont(); bf_q.setPointSize(13); bf_q.setBold(True)
         self.queue_add_btn.setFont(bf_q)
         self.queue_add_btn.clicked.connect(self._add_to_queue)
@@ -1152,9 +1215,39 @@ class MainWindow(QMainWindow):
         self.progress.setFormat("%p%")
         bot_lay.addWidget(self.progress)
 
-        self._left_splitter.setSizes([500, 460])
-        self._left_splitter.setStretchFactor(0, 1)
-        self._left_splitter.setStretchFactor(1, 1)
+        # ── 추출 결과 패널 (세 번째 _left_splitter 패널) ───────────────────────
+        _f9 = QFont(); _f9.setPointSize(9)
+        _result_w = QWidget()
+        _result_w.setMinimumHeight(30)
+        _result_outer = QVBoxLayout(_result_w)
+        _result_outer.setContentsMargins(12, 4, 12, 8)
+        _result_outer.setSpacing(4)
+
+        result_hdr = QHBoxLayout()
+        _result_lbl = QLabel("추출 결과")
+        _result_lbl.setFont(_f9)
+        result_hdr.addWidget(_result_lbl)
+        result_hdr.addStretch()
+        self._result_clear_btn = QPushButton("지우기")
+        self._result_clear_btn.setFixedWidth(70)
+        self._result_clear_btn.setFont(_f9)
+        self._result_clear_btn.clicked.connect(lambda: self.result_box.clear())
+        result_hdr.addWidget(self._result_clear_btn)
+        _result_outer.addLayout(result_hdr)
+
+        self.result_box = QTextBrowser()
+        self.result_box.setReadOnly(True)
+        self.result_box.setFont(_f9)
+        self.result_box.setOpenLinks(False)
+        self.result_box.setPlaceholderText("추출 완료 시 파일 경로가 여기에 표시됩니다.")
+        self.result_box.anchorClicked.connect(self._on_log_link_clicked)
+        _result_outer.addWidget(self.result_box)
+
+        self._left_splitter.addWidget(_result_w)
+        self._left_splitter.setSizes([460, 400, 100])
+        self._left_splitter.setStretchFactor(0, 5)
+        self._left_splitter.setStretchFactor(1, 4)
+        self._left_splitter.setStretchFactor(2, 1)
 
         # ── Right: 탭 위젯 (저장 폴더 / 로그) ───────────────────────────────────
         self._right_tabs = QTabWidget()
@@ -1356,6 +1449,8 @@ class MainWindow(QMainWindow):
         splitter.setSizes([730, 320])
         splitter.setStretchFactor(0, 7)
         splitter.setStretchFactor(1, 3)
+        splitter.setChildrenCollapsible(False)
+        self._right_vsplitter.setMinimumWidth(80)
 
         self.path_input.lineEdit().editingFinished.connect(self._refresh_file_list)
         self.path_input.currentIndexChanged.connect(self._refresh_file_list)
@@ -1528,7 +1623,13 @@ class MainWindow(QMainWindow):
                 self.queue_add_btn.setEnabled(True)
             player_url = f"http://127.0.0.1:{_SERVER_PORT}/"
             current = self.web.url().toString()
-            if current.rstrip('/') != player_url.rstrip('/'):
+            local_player_url = f"http://127.0.0.1:{_SERVER_PORT}/local_player"
+            html5_player_url = f"http://127.0.0.1:{_SERVER_PORT}/html5_player"
+            # YouTube 플레이어 페이지가 아닐 때만 복원
+            # (비YouTube 미리보기 중이면 그대로 둠)
+            if (current.rstrip('/') != player_url.rstrip('/')
+                    and not current.startswith(local_player_url)
+                    and not current.startswith(html5_player_url)):
                 self.web.setUrl(QUrl(player_url))
         self._update_overlay()
 
@@ -1536,8 +1637,9 @@ class MainWindow(QMainWindow):
     # Local file browse & preview
     # -----------------------------------------------------------------------
     def _browse_local_file(self):
+        os.makedirs(DOWNLOAD_DIR, exist_ok=True)
         path, _ = QFileDialog.getOpenFileName(
-            self, "영상 파일 선택", "",
+            self, "영상 파일 선택", DOWNLOAD_DIR,
             "동영상/GIF (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.m4v *.gif);;모든 파일 (*.*)")
         if path:
             self._local_file = path
@@ -1936,50 +2038,109 @@ v.addEventListener('click', function() {{ togglePlay(); }});
             self._yt_loaded = True  # 슬라이더/저장 버튼 활성화
             return
 
+        global _PROXY_URL
+        _PROXY_URL = stream_url
+        self._loaded_preview_url = orig_url
+        self._html5_dl_url = orig_url
+        self._log(f"📥 미리보기 다운로드 중: {title or orig_url}")
+        self._web_container.show_overlay("⏳ 미리보기 다운로드 중...")
+        threading.Thread(
+            target=self._download_preview_bg,
+            args=(stream_url,),
+            daemon=True
+        ).start()
+
+    def _download_preview_bg(self, stream_url: str):
+        """백그라운드 스레드: 스트림 URL을 임시 파일로 다운로드 후 시그널 발행."""
+        import urllib.request, ssl, tempfile
+        try:
+            req = urllib.request.Request(stream_url, headers={
+                'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                               'AppleWebKit/537.36 (KHTML, like Gecko) '
+                               'Chrome/124.0.0.0 Safari/537.36'),
+                'Accept': '*/*',
+            })
+            ctx = ssl.create_default_context()
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as resp:
+                ctype = resp.headers.get('Content-Type', '')
+                ext = '.webm' if 'webm' in ctype else '.mp4'
+                tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                tmp.close()
+                self._sig_preview_ready.emit(tmp.name)
+        except Exception as e:
+            self._log(f"미리보기 다운로드 실패: {e}")
+            self._sig_preview_ready.emit('')
+
+    def _on_preview_temp_ready(self, path: str):
+        """비YouTube 미리보기 다운로드 완료 → 로컬 서버로 서빙."""
+        # 이미 다른 URL/모드로 전환됐으면 무시
+        if (self._mode != 'url'
+                or self._loaded_preview_url != self._html5_dl_url):
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            return
+
+        # 이전 임시 파일 정리
+        if self._html5_preview_temp and os.path.isfile(self._html5_preview_temp):
+            try:
+                os.remove(self._html5_preview_temp)
+            except Exception:
+                pass
+        self._html5_preview_temp = path or None
+
+        if not path:
+            self._web_container.show_overlay("⚠ 미리보기 불가 — 다운로드는 가능합니다")
+            self._yt_loaded = True
+            return
+
+        self._log("✔ 미리보기 준비 완료")
+        global _LOCAL_VIDEO_PATH, _LOCAL_VIDEO_HTML
+        _LOCAL_VIDEO_PATH = path
+        video_url = f"http://127.0.0.1:{_SERVER_PORT}/video"
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-*{{margin:0;padding:0;box-sizing:border-box;}}
-html,body{{width:100%;height:100%;background:#000;overflow:hidden;cursor:pointer;}}
-video{{width:100%;height:100%;display:block;}}
-#err{{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-      color:#ff6b6b;background:rgba(0,0,0,.8);padding:14px 18px;border-radius:6px;
-      font-size:13px;text-align:center;max-width:80%;}}
-#ico{{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-      font-size:48px;color:rgba(255,255,255,.8);pointer-events:none;
-      opacity:0;transition:opacity 0.3s;}}
+* {{margin:0;padding:0;box-sizing:border-box;}}
+html,body {{width:100%;height:100%;background:#000;overflow:hidden;}}
+video {{width:100%;height:100%;}}
+#err {{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+       color:#ff6b6b;background:rgba(0,0,0,.8);padding:14px 18px;border-radius:6px;
+       font-size:13px;text-align:center;max-width:80%;}}
 </style></head><body>
-<video id="v" src="{stream_url}" preload="auto"></video>
+<video id="v" src="{video_url}" controls preload="metadata"></video>
 <div id="err"></div>
-<div id="ico">▶</div>
 <script>
-var v=document.getElementById('v');
-var errDiv=document.getElementById('err');
-var ico=document.getElementById('ico');
-window._videoError=null;
-v.onerror=function(){{
-  var msg=v.error?('코드 '+v.error.code+': '+(v.error.message||'재생 불가')):'알 수 없는 오류';
-  window._videoError=msg;errDiv.style.display='block';
-  errDiv.textContent='⚠ 미리보기 불가  ('+msg+')\n다운로드/구간 추출은 가능합니다';
+var v = document.getElementById('v');
+var errDiv = document.getElementById('err');
+window._videoError = null;
+v.onerror = function() {{
+  var msg = v.error ? ('코드 ' + v.error.code + ': ' + (v.error.message || '재생 불가')) : '알 수 없는 오류';
+  window._videoError = msg;
+  errDiv.style.display = 'block';
+  errDiv.textContent = '⚠ 미리보기 불가  (' + msg + ')';
 }};
-function _showIco(ch){{ico.textContent=ch;ico.style.opacity='1';setTimeout(function(){{ico.style.opacity='0';}},600);}}
-function getCurrentTime(){{return v.currentTime||0;}}
-function getDuration(){{return isNaN(v.duration)?0:v.duration;}}
-function seekTo(s){{var p=!v.paused;v.currentTime=s;_showIco(Math.round(s)+'s');if(p)v.play().catch(function(){{}});}}
-function setRate(r){{v.playbackRate=r;}}
-function getPlaybackRate(){{return v.playbackRate||1;}}
-function getVideoError(){{return window._videoError;}}
-function togglePlay(){{if(v.paused){{v.play().catch(function(){{}});_showIco('▶');}}else{{v.pause();_showIco('⏸');}}}}
-document.body.addEventListener('click',function(){{togglePlay();}});
+function getCurrentTime()  {{ return v.currentTime || 0; }}
+function getDuration()     {{ return isNaN(v.duration) ? 0 : v.duration; }}
+function seekTo(s)         {{ var p=!v.paused; v.currentTime=s; if(p) v.play().catch(function(){{}}); }}
+function setRate(r)        {{ v.playbackRate = r; }}
+function getPlaybackRate() {{ return v.playbackRate || 1; }}
+function getVideoError()   {{ return window._videoError; }}
+function togglePlay()      {{ if(v.paused) v.play().catch(function(){{}}); else v.pause(); }}
+v.addEventListener('click', function() {{ togglePlay(); }});
 </script>
 </body></html>"""
-        self.web.setHtml(html, QUrl(f"http://127.0.0.1:{_SERVER_PORT}/preview"))
-        self._loaded_preview_url = orig_url
+        _LOCAL_VIDEO_HTML = html.encode('utf-8')
         self._yt_loaded = True
         self._web_container.hide_overlay()
-        QTimer.singleShot(600, self._autoplay_html5)
-        if not dur:
-            self._dur_timer.start()
-        self._log(f"미리보기 준비 완료: {title or orig_url}")
+        self.web.setUrl(QUrl(f"http://127.0.0.1:{_SERVER_PORT}/local_player"))
+        self._dur_timer.start()
         if abs(self._speed - 1.0) > 0.001:
             QTimer.singleShot(500, lambda: self.web.page().runJavaScript(
                 f"setRate({self._speed});"))
@@ -2082,7 +2243,6 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self.start_in.setText(secs_to_hms(v))
         self._upd_start = False
         self._refresh_dur()
-        # 시작 핸들 드래그 시 영상 재생 시점 동기화
         if self._yt_loaded:
             self.web.page().runJavaScript(f"seekTo({v});")
 
@@ -2474,6 +2634,8 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         import time as _time
         self._dl_start_time   = _time.time()
         self._last_saved_path = None
+        self._result_in_queue = False
+        self.result_box.clear()
 
         start_s = self.rslider.start
         end_s   = self.rslider.end
@@ -2615,11 +2777,10 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         cur_text = self.cur_lbl.text()   # "현재 위치:  HH:MM:SS"
         parts = cur_text.split()
         time_str = parts[-1] if parts and ':' in parts[-1] else '00:00:00'
-        save_dir = self.path_input.currentText().strip() or DOWNLOAD_DIR
-        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         from datetime import datetime
         ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out = unique_path(os.path.join(save_dir, f'screenshot_{ts}.png'))
+        out = unique_path(os.path.join(SCREENSHOT_DIR, f'screenshot_{ts}.png'))
         if self._mode == 'local' and self._local_file and os.path.exists(self._local_file):
             args = ['-y', '-ss', time_str, '-i', self._local_file, '-frames:v', '1', out]
             self._run_process(FFMPEG_EXE, args,
@@ -3369,6 +3530,34 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self.log_box.append(html)
         self.log_box.verticalScrollBar().setValue(
             self.log_box.verticalScrollBar().maximum())
+        # ── 추출 결과 패널 갱신 ──────────────────────────────────────────────
+        fname = os.path.basename(path)
+        # 파일 크기
+        try:
+            size_bytes = os.path.getsize(path)
+            if size_bytes >= 1024 * 1024:
+                size_str = f"{size_bytes / 1024 / 1024:.1f} MB"
+            else:
+                size_str = f"{size_bytes / 1024:.0f} KB"
+        except Exception:
+            size_str = ''
+        # 구간 길이 (슬라이더 기준)
+        try:
+            dur_secs = int(self.rslider.end - self.rslider.start)
+            dur_str = f"{dur_secs // 60}:{dur_secs % 60:02d}"
+        except Exception:
+            dur_str = ''
+        info_parts = [p for p in [size_str, dur_str] if p]
+        info_str = f'  <span style="color:#aaa;">({", ".join(info_parts)})</span>' if info_parts else ''
+        result_html = (f'<a href="{href}" style="color:#5aabff;text-decoration:none;">'
+                       f'📄 {fname}</a>{info_str}'
+                       f'<br><span style="color:#888;font-size:8pt;">{path}</span>')
+        if not self._result_in_queue:
+            self.result_box.setHtml(result_html)
+        else:
+            self.result_box.append(result_html)
+        self.result_box.verticalScrollBar().setValue(
+            self.result_box.verticalScrollBar().maximum())
 
     def _find_new_file(self, save_dir: str):
         """다운로드 시작 이후 생성된 가장 새로운 파일을 반환."""
@@ -4018,6 +4207,8 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self._queue_idx     = 0
         self._queue_results = []
         self._queue_result_durations = {}
+        self._result_in_queue = True
+        self.result_box.clear()
         self.dl_btn.setEnabled(False)
         self.queue_add_btn.setEnabled(False)
         self._queue_run_btn.setEnabled(False)
@@ -4274,6 +4465,8 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self._gif_queue_running = True
         self._gif_queue_idx     = 0
         self._gif_queue_results = []
+        self._result_in_queue = True
+        self.result_box.clear()
         self.dl_btn.setEnabled(False)
         self.queue_add_btn.setEnabled(False)
         self._gif_queue_run_btn.setEnabled(False)
@@ -4635,6 +4828,11 @@ document.body.addEventListener('click',function(){{togglePlay();}});
         self._save_settings()
         self._poll_timer.stop()
         self._dur_timer.stop()
+        if self._html5_preview_temp and os.path.isfile(self._html5_preview_temp):
+            try:
+                os.remove(self._html5_preview_temp)
+            except Exception:
+                pass
         # 실행 중인 모든 프로세스: 신호 끊고 kill → waitForFinished
         _procs = [
             self._process,
