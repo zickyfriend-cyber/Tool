@@ -100,7 +100,7 @@ def _start_server():
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.5"
+APP_VERSION      = "1.6"
 _GH_RELEASES_API = "https://api.github.com/repos/zickyfriend-cyber/Tool/releases/latest"
 # PyInstaller 번들 실행 시 sys.executable 기준, 일반 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
@@ -2810,26 +2810,27 @@ v.addEventListener('click',function(){{togglePlay();}});
                 self.progress.setValue(pct)
 
     def _on_done(self, code: int, _status):
+        save_dir = self.path_input.currentText().strip() or DOWNLOAD_DIR
+        found_path = None
         if code == 0:
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
-            save_dir = self.path_input.currentText().strip() or DOWNLOAD_DIR
             self._add_recent_path(save_dir)
-            path = self._last_saved_path or self._find_new_file(save_dir)
-            if path and os.path.isfile(path):
-                self._new_file_paths.add(path)
-                self._log_link("✔ 완료!  저장 위치: ", path)
+            # _find_new_file을 한 번만 호출해 경로를 일관되게 유지
+            found_path = self._last_saved_path or self._find_new_file(save_dir)
+            if found_path and os.path.isfile(found_path):
+                self._new_file_paths.add(found_path)
+                self._log_link("✔ 완료!  저장 위치: ", found_path)
                 if self.autoopen_chk.isChecked():
-                    os.startfile(path)
+                    os.startfile(found_path)
             else:
                 self._log(f"✔ 완료!  저장 위치: {save_dir}")
+                found_path = None
             self._refresh_file_list()
         else:
             self._log(f"✘ 실패 (종료 코드: {code})")
         if self._queue_running:
-            self._on_queue_item_done(
-                self._last_saved_path or self._find_new_file(
-                    self.path_input.currentText().strip() or DOWNLOAD_DIR) or '', code == 0)
+            self._on_queue_item_done(found_path or '', code == 0)
         else:
             self._reset_dl_ui()
 
@@ -4125,6 +4126,7 @@ v.addEventListener('click',function(){{togglePlay();}});
                 p.readAll().data().decode('utf-8', errors='replace').strip()))
         concat_proc.finished.connect(self._on_concat_done)
         _cargs = ['-y', '-f', 'concat', '-safe', '0',
+                  '-avoid_negative_ts', 'make_zero',
                   '-i', list_path, '-c', 'copy', merged_path]
         concat_proc.start(FFMPEG_EXE, _cargs)
         self._concat_proc = concat_proc
